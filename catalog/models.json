@@ -1,0 +1,2608 @@
+{
+  "schema_version": "1.0",
+  "kv_cache_formula": {
+    "equation": "kv_gb = (2 * layers * kv_heads * head_dim * bytes_per_elem * context_tokens) / (1024 ** 3)",
+    "bytes_per_elem": {
+      "q4_0": 0.5625,
+      "q8_0": 1.0625,
+      "fp16": 2.0
+    },
+    "approx_estimator_bytes_per_token": "weights_gb / 14.0 * 0.000085 GB/tok at fp16 (~0.28x for q4_0, ~0.52x for q8_0)",
+    "turing_t4_note": "On Turing Tesla T4 (sm_75), quantized KV cache (q4_0) works reliably with standard attention or modern llama-server -fa; older llama-cpp-python CUDA wheels can assert k->type == GGML_TYPE_F16 when combining flash_attn=True with q4_0\u2014always test fallback flash_attn=False on T4."
+  },
+  "quant_bpw_reference": {
+    "IQ3_M": {
+      "bpw": 3.52,
+      "cpu_notes": "27% smaller bus transfer than Q4_K_M; ideal for 80B-109B MoE in 51GB RAM"
+    },
+    "IQ4_XS": {
+      "bpw": 4.25,
+      "cpu_notes": "Imatrix LUT decoded via vpshufb; 3.63x faster prefill on ik_llama.cpp -rtr than mainline Q4_K_M"
+    },
+    "Q4_0": {
+      "bpw": 4.5,
+      "cpu_notes": "Symmetric 4-bit; zero min-offset math"
+    },
+    "Q4_K_M": {
+      "bpw": 4.85,
+      "cpu_notes": "Balanced GPU general default"
+    },
+    "PQ2_0": {
+      "bpw": 1.71,
+      "cpu_notes": "Sub-2-bit ternary (PrismML llama.cpp fork required)"
+    }
+  },
+  "hardware_profiles": {
+    "colab_gpu": {
+      "name": "Google Colab Free (Single Tesla T4 \u2022 In-Notebook UI)",
+      "platform": "colab",
+      "colab_tier": "free",
+      "vram_gb": 14.56,
+      "ram_gb": 12.7,
+      "swap_gb": 16.0,
+      "total_memory_gb": 43.26,
+      "device": "cuda",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_credits": 0.0
+    },
+    "colab_cpu": {
+      "name": "Google Colab Free CPU (2-vCPU \u2022 In-Notebook UI)",
+      "platform": "colab",
+      "colab_tier": "free",
+      "vram_gb": 0.0,
+      "ram_gb": 12.7,
+      "swap_gb": 16.0,
+      "total_memory_gb": 28.7,
+      "device": "cpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": false,
+      "hourly_credits": 0.0
+    },
+    "colab_pro_t4": {
+      "name": "Colab Pro Tesla T4 (15.3GB VRAM \u2022 1.96 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 15.3,
+      "ram_gb": 12.7,
+      "std_ram_gb": 12.7,
+      "high_ram_gb": 52.0,
+      "swap_gb": 16.0,
+      "high_mem_supported": true,
+      "total_memory_gb": 68.0,
+      "device": "cuda",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_credits": 1.96,
+      "high_mem_hourly_credits": 2.35
+    },
+    "colab_pro_a100": {
+      "name": "Colab Pro A100-SXM4-40GB (40GB VRAM \u2022 13.08 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 40.0,
+      "ram_gb": 83.5,
+      "swap_gb": 16.0,
+      "total_memory_gb": 139.5,
+      "device": "cuda",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_credits": 13.08
+    },
+    "colab_pro_l4": {
+      "name": "Colab Pro NVIDIA L4 (24GB VRAM \u2022 3.5 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 24.0,
+      "ram_gb": 32.0,
+      "swap_gb": 16.0,
+      "total_memory_gb": 72.0,
+      "device": "cuda",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_credits": 3.5
+    },
+    "colab_pro_g4": {
+      "name": "Colab Pro NVIDIA G4 (96GB VRAM \u2022 6.4 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 96.0,
+      "ram_gb": 96.0,
+      "swap_gb": 32.0,
+      "total_memory_gb": 224.0,
+      "device": "cuda",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_credits": 6.4
+    },
+    "colab_pro_h100": {
+      "name": "Colab Pro NVIDIA H100 (80GB VRAM \u2022 25.0 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 80.0,
+      "ram_gb": 128.0,
+      "swap_gb": 16.0,
+      "total_memory_gb": 224.0,
+      "device": "cuda",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_credits": 25.0
+    },
+    "colab_pro_v5e1": {
+      "name": "Colab Pro TPU v5e1 (16GB HBM \u2022 2.5 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 16.0,
+      "ram_gb": 32.0,
+      "swap_gb": 16.0,
+      "total_memory_gb": 64.0,
+      "device": "tpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": true,
+      "hourly_credits": 2.5
+    },
+    "colab_pro_v6e1": {
+      "name": "Colab Pro TPU v6e1 Trillium (32GB HBM \u2022 175GB Host RAM \u2022 4.2 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 32.0,
+      "ram_gb": 175.0,
+      "swap_gb": 32.0,
+      "total_memory_gb": 239.0,
+      "device": "tpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": true,
+      "hourly_credits": 4.2
+    },
+    "colab_pro_v6e": {
+      "name": "Colab Pro TPU v6e1 Trillium (32GB HBM \u2022 175GB Host RAM \u2022 4.2 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 32.0,
+      "ram_gb": 175.0,
+      "swap_gb": 32.0,
+      "total_memory_gb": 239.0,
+      "device": "tpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": true,
+      "hourly_credits": 4.2
+    },
+    "colab_pro_v100": {
+      "name": "Colab Pro V100-16GB (16GB VRAM \u2022 5.4 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 16.0,
+      "ram_gb": 51.0,
+      "swap_gb": 16.0,
+      "total_memory_gb": 83.0,
+      "device": "cuda",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_credits": 5.4
+    },
+    "colab_pro_tpu": {
+      "name": "Colab Pro TPU v2/v3-8 (64GB HBM \u2022 5.4 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 64.0,
+      "ram_gb": 32.0,
+      "swap_gb": 16.0,
+      "total_memory_gb": 112.0,
+      "device": "tpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": true,
+      "hourly_credits": 5.4
+    },
+    "colab_pro_highram_cpu": {
+      "name": "Colab Pro High-RAM CPU (8-vCPU \u2022 51GB RAM \u2022 0.24 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 0.0,
+      "ram_gb": 51.0,
+      "swap_gb": 32.0,
+      "total_memory_gb": 83.0,
+      "device": "cpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": false,
+      "hourly_credits": 0.24
+    },
+    "colab_pro_tpu_host": {
+      "name": "Colab Pro TPU Host-RAM (96-vCPU \u2022 335GB RAM \u2022 5.4 credits/hr)",
+      "platform": "colab",
+      "colab_tier": "pro",
+      "vram_gb": 0.0,
+      "ram_gb": 335.0,
+      "swap_gb": 64.0,
+      "total_memory_gb": 399.0,
+      "device": "cpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": false,
+      "hourly_credits": 5.4
+    },
+    "kaggle_gpu": {
+      "name": "Kaggle GPU (Dual Tesla T4 \u2022 Batch Only)",
+      "platform": "kaggle",
+      "vram_gb": 30.72,
+      "ram_gb": 30.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 60.72,
+      "device": "cuda",
+      "gpus": 2,
+      "has_gpu": true,
+      "has_tpu": false,
+      "batch_only": true
+    },
+    "kaggle_cpu": {
+      "name": "Kaggle CPU (4-vCPU \u2022 Batch Only)",
+      "platform": "kaggle",
+      "vram_gb": 0.0,
+      "ram_gb": 30.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 30.0,
+      "device": "cpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": false,
+      "batch_only": true
+    },
+    "kaggle_tpu": {
+      "name": "Kaggle TPU (v3-8 \u2022 Batch Only)",
+      "platform": "kaggle",
+      "vram_gb": 64.0,
+      "ram_gb": 16.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 80.0,
+      "device": "tpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": true,
+      "batch_only": true
+    },
+    "modal_a100_80gb": {
+      "name": "Modal A100-80GB ($2.50/hr \u2022 Frontier)",
+      "platform": "modal",
+      "vram_gb": 80.0,
+      "ram_gb": 32.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 112.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 2.5,
+      "rate_sec": 0.000694
+    },
+    "modal_h100": {
+      "name": "Modal H100 (80GB HBM3 \u2022 $3.95/hr)",
+      "platform": "modal",
+      "vram_gb": 80.0,
+      "ram_gb": 32.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 112.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 3.95,
+      "rate_sec": 0.001097
+    },
+    "modal_h200": {
+      "name": "Modal H200 Standard (141GB HBM3e \u2022 8-core / 64GB RAM \u2022 $7.21/hr)",
+      "platform": "modal",
+      "vram_gb": 141.0,
+      "ram_gb": 64.0,
+      "cpu_cores": 8.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 205.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 7.21,
+      "rate_sec": 0.002003
+    },
+    "modal_h200_eco": {
+      "name": "Modal H200 Economy (141GB HBM3e \u2022 2-core / 8GB RAM \u2022 $4.85/hr)",
+      "platform": "modal",
+      "vram_gb": 141.0,
+      "ram_gb": 8.0,
+      "cpu_cores": 2.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 149.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 4.85,
+      "rate_sec": 0.001347
+    },
+    "modal_a100_40gb": {
+      "name": "Modal A100-40GB ($2.10/hr)",
+      "platform": "modal",
+      "vram_gb": 40.0,
+      "ram_gb": 32.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 72.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 2.1,
+      "rate_sec": 0.000583
+    },
+    "modal_a10g": {
+      "name": "Modal A10G (24GB \u2022 $1.10/hr 3D & DiT)",
+      "platform": "modal",
+      "vram_gb": 24.0,
+      "ram_gb": 16.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 40.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 1.1,
+      "rate_sec": 0.000306
+    },
+    "modal_l4": {
+      "name": "Modal L4 (24GB \u2022 $0.80/hr Fast DiT)",
+      "platform": "modal",
+      "vram_gb": 24.0,
+      "ram_gb": 16.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 40.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 0.8,
+      "rate_sec": 0.000222
+    },
+    "modal_t4": {
+      "name": "Modal T4 (16GB \u2022 $0.59/hr Budget)",
+      "platform": "modal",
+      "vram_gb": 16.0,
+      "ram_gb": 16.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 32.0,
+      "device": "cuda:0",
+      "gpus": 1,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 0.59,
+      "rate_sec": 0.000164
+    },
+    "modal_multi_a100_2x": {
+      "name": "Modal 2x A100-80GB (160GB \u2022 $5.00/hr)",
+      "platform": "modal",
+      "vram_gb": 160.0,
+      "ram_gb": 64.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 224.0,
+      "device": "cuda:0,cuda:1",
+      "gpus": 2,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 5.0,
+      "rate_sec": 0.001388
+    },
+    "modal_multi_h100_8x": {
+      "name": "Modal 8x H100 (640GB \u2022 $31.60/hr 405B)",
+      "platform": "modal",
+      "vram_gb": 640.0,
+      "ram_gb": 256.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 896.0,
+      "device": "cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7",
+      "gpus": 8,
+      "has_gpu": true,
+      "has_tpu": false,
+      "hourly_cost": 31.6,
+      "rate_sec": 0.008776
+    },
+    "modal_cpu": {
+      "name": "Modal CPU (8-vCPU \u2022 32GB RAM \u2022 $0.38/hr)",
+      "platform": "modal",
+      "vram_gb": 0.0,
+      "ram_gb": 32.0,
+      "swap_gb": 0.0,
+      "total_memory_gb": 32.0,
+      "device": "cpu",
+      "gpus": 0,
+      "has_gpu": false,
+      "has_tpu": false,
+      "hourly_cost": 0.38,
+      "rate_sec": 0.000105
+    }
+  },
+  "sampling_profiles": {
+    "qwen3.8-35b-uncensored": {
+      "temperature": 0.6,
+      "min_p": 0.08,
+      "top_k": 30,
+      "repeat_penalty": 1.08,
+      "notes": "Reasoning MoE; keep temp low to prevent routing thrashing."
+    },
+    "qwen3.8-27b-humanlike": {
+      "temperature": 0.85,
+      "min_p": 0.07,
+      "top_k": 40,
+      "repeat_penalty": 1.12,
+      "notes": "De-assistantized humanlike prose; avoid assistant system boilerplate."
+    },
+    "ternary-bonsai-2-27b": {
+      "temperature": 0.7,
+      "min_p": 0.08,
+      "top_k": 40,
+      "repeat_penalty": 1.08,
+      "notes": "Sub-2-bit ternary (PQ2_0/PTQ1_0); requires Min-P truncation + PrismML fork."
+    },
+    "magnum-12b-kto": {
+      "temperature": 0.75,
+      "min_p": 0.1,
+      "top_k": 0,
+      "repeat_penalty": 1.05,
+      "notes": "Top-K disabled; rely on Min-P 0.10 for vibrant prose."
+    },
+    "celeste-12b": {
+      "temperature": 0.7,
+      "min_p": 0.08,
+      "top_k": 50,
+      "repeat_penalty": 1.06,
+      "notes": "Mistral Nemo base; keep T <= 0.75 to avoid delirium."
+    },
+    "stheno-8b-v3.2": {
+      "temperature": 0.8,
+      "min_p": 0.05,
+      "top_k": 40,
+      "repeat_penalty": 1.1,
+      "notes": "Elevated repeat_penalty prevents multi-turn dialogue loops."
+    },
+    "orcabonsai-27b-uncensored": {
+      "temperature": 0.7,
+      "min_p": 0.08,
+      "top_k": 40,
+      "repeat_penalty": 1.08,
+      "notes": "Runtime refusal-steering vector; throttle alpha->0.0 for JSON/math."
+    },
+    "qwen2.5-coder-32b": {
+      "temperature": 0.25,
+      "min_p": 0.05,
+      "top_k": 40,
+      "repeat_penalty": 1.05,
+      "notes": "Low temperature for deterministic coding & diffs."
+    },
+    "qwen2.5-coder-14b": {
+      "temperature": 0.25,
+      "min_p": 0.05,
+      "top_k": 40,
+      "repeat_penalty": 1.05,
+      "notes": "Low temperature for deterministic coding & diffs."
+    },
+    "qwen2.5-coder-7b": {
+      "temperature": 0.25,
+      "min_p": 0.05,
+      "top_k": 40,
+      "repeat_penalty": 1.05,
+      "notes": "Low temperature for fast single-T4 coding."
+    }
+  },
+  "models": {
+    "text": {
+      "llama-3.2-3b-abliterated": {
+        "name": "Llama 3.2 3B Instruct Abliterated",
+        "weights_gb": 2.1,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/Llama-3.2-3B-Instruct-abliterated-GGUF",
+        "file": "Llama-3.2-3B-Instruct-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "Llama-3.2-3B-Instruct-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Llama-3.2-3B-Instruct-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Llama-3.2-3B-Instruct-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Llama-3.2-3B-Instruct-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Llama-3.2-3B-Instruct-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Llama-3.2-3B-Instruct-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Llama-3.2-3B-Instruct-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "Llama-3.2-3B-Instruct-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "Llama-3.2-3B-Instruct-abliterated.Q5_K_S.gguf",
+          "Q6_K": "Llama-3.2-3B-Instruct-abliterated.Q6_K.gguf",
+          "Q8_0": "Llama-3.2-3B-Instruct-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+        "fallback_file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "hf_model": "failspy/Llama-3.2-3B-Instruct-abliterated",
+        "base_context": 4096,
+        "max_context": 32768,
+        "release_date": "September 2024",
+        "category": "Edge Conversational & Fast Chat",
+        "architecture": "Llama 3.2 Dense Transformer",
+        "params": "3.21B Dense",
+        "notes": "Exceptional edge conversational model. Meta's 3B architecture runs blisteringly fast (~85 tok/s on T4, 25 tok/s on CPU). Abliterated to completely excise corporate refusals, preachy preambles, and sterile canned disclaimers. Sweet-spot hyperparameters: Min-P 0.05, Temperature 0.75. Ideal for lightweight chat and instantaneous local tool execution.",
+        "strengths": [
+          "Sub-15ms time-to-first-token",
+          "Runs natively in 2.1GB VRAM or CPU RAM",
+          "Zero sycophancy or disclaimers"
+        ],
+        "recommended_for": "Fast chat, mobile PWA assistant, and low-latency interactive tasks",
+        "tags": [
+          "Fast",
+          "Human Cadence",
+          "Min-P 0.05"
+        ]
+      },
+      "qwen2.5-coder-7b": {
+        "name": "Qwen 2.5 Coder 7B Instruct Abliterated",
+        "weights_gb": 4.7,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF",
+        "file": "Qwen2.5-Coder-7B-Instruct-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ3_M": "Qwen2.5-Coder-7B-Instruct-abliterated.IQ3_M.gguf",
+          "IQ3_S": "Qwen2.5-Coder-7B-Instruct-abliterated.IQ3_S.gguf",
+          "IQ3_XS": "Qwen2.5-Coder-7B-Instruct-abliterated.IQ3_XS.gguf",
+          "IQ4_XS": "Qwen2.5-Coder-7B-Instruct-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Qwen2.5-Coder-7B-Instruct-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Qwen2.5-Coder-7B-Instruct-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Qwen2.5-Coder-7B-Instruct-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Qwen2.5-Coder-7B-Instruct-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Qwen2.5-Coder-7B-Instruct-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Qwen2.5-Coder-7B-Instruct-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "Qwen2.5-Coder-7B-Instruct-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "Qwen2.5-Coder-7B-Instruct-abliterated.Q5_K_S.gguf",
+          "Q6_K": "Qwen2.5-Coder-7B-Instruct-abliterated.Q6_K.gguf",
+          "Q8_0": "Qwen2.5-Coder-7B-Instruct-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+        "fallback_file": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        "hf_model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+        "base_context": 4096,
+        "max_context": 32768,
+        "release_date": "September 2024",
+        "category": "Autonomous Coding Agent (Compact)",
+        "architecture": "Qwen 2.5 Dense Transformer",
+        "params": "7.61B Dense",
+        "notes": "The gold standard for sub-10B coding models. Outperforms original CodeLlama-34B on HumanEval and SWE-bench Lite. Abliteration removes false refusal triggers on cybersecurity, pentesting scripts, and system administration commands. Flawless JSON/tool schema output format adherence.",
+        "strengths": [
+          "State-of-the-art Python/JS syntax accuracy",
+          "Fits in pure VRAM alongside SD-Turbo",
+          "Strict JSON schema adherence"
+        ],
+        "recommended_for": "Aider / Cursor CLI coding on Single T4 or 4-vCPU RAM",
+        "tags": [
+          "Coding",
+          "Fast SOTA",
+          "Abliterated"
+        ],
+        "sampling_profile": {
+          "temperature": 0.25,
+          "min_p": 0.05,
+          "top_k": 40,
+          "repeat_penalty": 1.05,
+          "notes": "Low temperature for fast single-T4 coding."
+        }
+      },
+      "deepseek-r1-7b": {
+        "name": "DeepSeek R1 Distill Qwen 7B",
+        "weights_gb": 4.6,
+        "quant": "Q4_K_M",
+        "repo": "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+        "file": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        "quant_files": {
+          "IQ2_M": "DeepSeek-R1-Distill-Qwen-7B-IQ2_M.gguf",
+          "IQ3_M": "DeepSeek-R1-Distill-Qwen-7B-IQ3_M.gguf",
+          "IQ3_XS": "DeepSeek-R1-Distill-Qwen-7B-IQ3_XS.gguf",
+          "IQ4_XS": "DeepSeek-R1-Distill-Qwen-7B-IQ4_XS.gguf",
+          "Q2_K": "DeepSeek-R1-Distill-Qwen-7B-Q2_K.gguf",
+          "Q3_K_L": "DeepSeek-R1-Distill-Qwen-7B-Q3_K_L.gguf",
+          "Q3_K_M": "DeepSeek-R1-Distill-Qwen-7B-Q3_K_M.gguf",
+          "Q3_K_S": "DeepSeek-R1-Distill-Qwen-7B-Q3_K_S.gguf",
+          "Q4_0": "DeepSeek-R1-Distill-Qwen-7B-Q4_0.gguf",
+          "Q4_K_M": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+          "Q4_K_S": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_S.gguf",
+          "Q5_K_M": "DeepSeek-R1-Distill-Qwen-7B-Q5_K_M.gguf",
+          "Q5_K_S": "DeepSeek-R1-Distill-Qwen-7B-Q5_K_S.gguf",
+          "Q6_K": "DeepSeek-R1-Distill-Qwen-7B-Q6_K.gguf",
+          "Q8_0": "DeepSeek-R1-Distill-Qwen-7B-Q8_0.gguf"
+        },
+        "fallback_repo": "mradermacher/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+        "fallback_file": "DeepSeek-R1-Distill-Qwen-7B.Q4_K_M.gguf",
+        "hf_model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+        "base_context": 4096,
+        "max_context": 32768,
+        "release_date": "January 2025",
+        "category": "Frontier Reasoning & Math",
+        "architecture": "Qwen 2.5 Transformer + R1 Distillation",
+        "params": "7.61B Dense",
+        "notes": "A breakthrough in small-footprint reasoning. Distilled directly from DeepSeek-R1 671B, it emits transparent, structured <think> reasoning chains before its answers. Beats legacy 30B+ models on AIME and MATH-500. Runs smoothly in 4.6GB VRAM on Colab or 30GB RAM on Kaggle CPU.",
+        "strengths": [
+          "Structured <think> reasoning trace",
+          "Exceptional mathematical and logic proofs",
+          "Sub-5GB footprint"
+        ],
+        "recommended_for": "Complex algorithmic troubleshooting, math verification, and logic puzzles",
+        "tags": [
+          "Deep Reasoning",
+          "<think> Trace",
+          "Math SOTA"
+        ]
+      },
+      "stheno-8b-v3.2": {
+        "name": "L3 8B Stheno v3.2 (Sao10K Uncensored)",
+        "weights_gb": 5.2,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/L3-8B-Stheno-v3.2-GGUF",
+        "file": "L3-8B-Stheno-v3.2.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ3_M": "L3-8B-Stheno-v3.2.IQ3_M.gguf",
+          "IQ3_S": "L3-8B-Stheno-v3.2.IQ3_S.gguf",
+          "IQ3_XS": "L3-8B-Stheno-v3.2.IQ3_XS.gguf",
+          "IQ4_XS": "L3-8B-Stheno-v3.2.IQ4_XS.gguf",
+          "Q2_K": "L3-8B-Stheno-v3.2.Q2_K.gguf",
+          "Q3_K_L": "L3-8B-Stheno-v3.2.Q3_K_L.gguf",
+          "Q3_K_M": "L3-8B-Stheno-v3.2.Q3_K_M.gguf",
+          "Q3_K_S": "L3-8B-Stheno-v3.2.Q3_K_S.gguf",
+          "Q4_K_M": "L3-8B-Stheno-v3.2.Q4_K_M.gguf",
+          "Q4_K_S": "L3-8B-Stheno-v3.2.Q4_K_S.gguf",
+          "Q5_K_M": "L3-8B-Stheno-v3.2.Q5_K_M.gguf",
+          "Q5_K_S": "L3-8B-Stheno-v3.2.Q5_K_S.gguf",
+          "Q6_K": "L3-8B-Stheno-v3.2.Q6_K.gguf",
+          "Q8_0": "L3-8B-Stheno-v3.2.Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/L3-8B-Stheno-v3.2-GGUF",
+        "fallback_file": "L3-8B-Stheno-v3.2-Q4_K_M.gguf",
+        "hf_model": "Sao10K/L3-8B-Stheno-v3.2",
+        "base_context": 4096,
+        "max_context": 16384,
+        "release_date": "June 2024",
+        "category": "Roleplay & Creative Dialogue",
+        "architecture": "Llama 3 Dense Transformer",
+        "params": "8.03B Dense",
+        "notes": "The community champion for creative writing and deep narrative roleplay by Sao10K. Thoroughly de-assistantized: eliminates sterile canned replies, maintains consistent personality across long conversations, and handles dark or complex themes without lecture triggers. Best at Temp 0.85, Min-P 0.05.",
+        "strengths": [
+          "Vivid prose and emotional cadence",
+          "Complete elimination of preachiness",
+          "Rock-solid 8k-16k context recall"
+        ],
+        "recommended_for": "Immersive storytelling, character simulation, and creative fiction",
+        "tags": [
+          "Creative Writing",
+          "Sao10K RP",
+          "Zero Moralizing"
+        ],
+        "sampling_profile": {
+          "temperature": 0.8,
+          "min_p": 0.05,
+          "top_k": 40,
+          "repeat_penalty": 1.1,
+          "notes": "Elevated repeat_penalty prevents multi-turn dialogue loops."
+        }
+      },
+      "gemma-2-9b": {
+        "name": "Gemma 2 9B IT Abliterated",
+        "weights_gb": 5.9,
+        "quant": "Q4_K_M",
+        "repo": "bartowski/gemma-2-9b-it-GGUF",
+        "file": "gemma-2-9b-it-Q4_K_M.gguf",
+        "quant_files": {
+          "IQ2_M": "gemma-2-9b-it-IQ2_M.gguf",
+          "IQ3_M": "gemma-2-9b-it-IQ3_M.gguf",
+          "IQ3_XS": "gemma-2-9b-it-IQ3_XS.gguf",
+          "IQ4_XS": "gemma-2-9b-it-IQ4_XS.gguf",
+          "Q2_K": "gemma-2-9b-it-Q2_K.gguf",
+          "Q3_K_L": "gemma-2-9b-it-Q3_K_L.gguf",
+          "Q3_K_M": "gemma-2-9b-it-Q3_K_M.gguf",
+          "Q3_K_S": "gemma-2-9b-it-Q3_K_S.gguf",
+          "Q4_K_M": "gemma-2-9b-it-Q4_K_M.gguf",
+          "Q4_K_S": "gemma-2-9b-it-Q4_K_S.gguf",
+          "Q5_K_M": "gemma-2-9b-it-Q5_K_M.gguf",
+          "Q5_K_S": "gemma-2-9b-it-Q5_K_S.gguf",
+          "Q6_K": "gemma-2-9b-it-Q6_K.gguf",
+          "Q8_0": "gemma-2-9b-it-Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/gemma-2-9b-it-GGUF",
+        "fallback_file": "gemma-2-9b-it-Q4_K_M.gguf",
+        "hf_model": "failspy/gemma-2-9b-it-abliterated",
+        "base_context": 4096,
+        "max_context": 8192,
+        "release_date": "June 2024",
+        "category": "Frontier Reasoning & Knowledge",
+        "architecture": "Gemma 2 (Sliding Window + Logit Soft-Capping)",
+        "params": "9.24B Dense",
+        "notes": "Google's 9B dense architecture punches far above its weight class, rivaling Llama 3 70B on several knowledge benchmarks. Abliteration frees it from extreme Google alignment filters. Note: Strict 8k context ceiling due to dual sliding-window attention architecture.",
+        "strengths": [
+          "Phenomenal factual knowledge retrieval",
+          "High cognitive density",
+          "Abliterated refusal removal"
+        ],
+        "recommended_for": "General reasoning, structured analysis, and technical QA",
+        "tags": [
+          "High Reasoning",
+          "Uncensored"
+        ]
+      },
+      "celeste-12b": {
+        "name": "Mistral Nemo 12B Celeste v1.9",
+        "weights_gb": 7.5,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/MN-12B-Celeste-V1.9-GGUF",
+        "file": "MN-12B-Celeste-V1.9.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ3_M": "MN-12B-Celeste-V1.9.IQ3_M.gguf",
+          "IQ3_S": "MN-12B-Celeste-V1.9.IQ3_S.gguf",
+          "IQ3_XS": "MN-12B-Celeste-V1.9.IQ3_XS.gguf",
+          "IQ4_XS": "MN-12B-Celeste-V1.9.IQ4_XS.gguf",
+          "Q2_K": "MN-12B-Celeste-V1.9.Q2_K.gguf",
+          "Q3_K_L": "MN-12B-Celeste-V1.9.Q3_K_L.gguf",
+          "Q3_K_M": "MN-12B-Celeste-V1.9.Q3_K_M.gguf",
+          "Q3_K_S": "MN-12B-Celeste-V1.9.Q3_K_S.gguf",
+          "Q4_K_M": "MN-12B-Celeste-V1.9.Q4_K_M.gguf",
+          "Q4_K_S": "MN-12B-Celeste-V1.9.Q4_K_S.gguf",
+          "Q5_K_M": "MN-12B-Celeste-V1.9.Q5_K_M.gguf",
+          "Q5_K_S": "MN-12B-Celeste-V1.9.Q5_K_S.gguf",
+          "Q6_K": "MN-12B-Celeste-V1.9.Q6_K.gguf",
+          "Q8_0": "MN-12B-Celeste-V1.9.Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/MN-12B-Celeste-V1.9-GGUF",
+        "fallback_file": "MN-12B-Celeste-V1.9-Q4_K_M.gguf",
+        "hf_model": "nothingiisreal/MN-12B-Celeste-V1.9",
+        "base_context": 8192,
+        "max_context": 128000,
+        "release_date": "August 2024",
+        "category": "Anti-Assistant & Creative Dialogue",
+        "architecture": "Mistral Nemo 128k Dense Transformer",
+        "params": "12.2B Dense",
+        "notes": "Tuned by nothingiisreal specifically to eliminate sycophancy and AI assistant clich\u00e9s. Combines Mistral Nemo's massive 128k native context with authentic, organic sentence structures. Exceptional at reading entire code repositories or book manuscripts without memory degradation.",
+        "strengths": [
+          "128k native context window",
+          "Zero robotic assistant clich\u00e9s",
+          "Deep situational memory"
+        ],
+        "recommended_for": "Long-form book analysis, large codebase ingestion, and authentic dialogue",
+        "tags": [
+          "128k Context",
+          "Anti-Assistant",
+          "Organic Dialogue"
+        ],
+        "sampling_profile": {
+          "temperature": 0.7,
+          "min_p": 0.08,
+          "top_k": 50,
+          "repeat_penalty": 1.06,
+          "notes": "Mistral Nemo base; keep T <= 0.75 to avoid delirium."
+        }
+      },
+      "magnum-12b-kto": {
+        "name": "Magnum v2.5 12B KTO (Claude-like)",
+        "weights_gb": 7.8,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/magnum-v2.5-12b-kto-GGUF",
+        "file": "magnum-v2.5-12b-kto.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ3_M": "magnum-v2.5-12b-kto.IQ3_M.gguf",
+          "IQ3_S": "magnum-v2.5-12b-kto.IQ3_S.gguf",
+          "IQ3_XS": "magnum-v2.5-12b-kto.IQ3_XS.gguf",
+          "IQ4_XS": "magnum-v2.5-12b-kto.IQ4_XS.gguf",
+          "Q2_K": "magnum-v2.5-12b-kto.Q2_K.gguf",
+          "Q3_K_L": "magnum-v2.5-12b-kto.Q3_K_L.gguf",
+          "Q3_K_M": "magnum-v2.5-12b-kto.Q3_K_M.gguf",
+          "Q3_K_S": "magnum-v2.5-12b-kto.Q3_K_S.gguf",
+          "Q4_K_M": "magnum-v2.5-12b-kto.Q4_K_M.gguf",
+          "Q4_K_S": "magnum-v2.5-12b-kto.Q4_K_S.gguf",
+          "Q5_K_M": "magnum-v2.5-12b-kto.Q5_K_M.gguf",
+          "Q5_K_S": "magnum-v2.5-12b-kto.Q5_K_S.gguf",
+          "Q6_K": "magnum-v2.5-12b-kto.Q6_K.gguf",
+          "Q8_0": "magnum-v2.5-12b-kto.Q8_0.gguf"
+        },
+        "fallback_repo": "anthracite-org/magnum-v2.5-12b-kto-GGUF",
+        "fallback_file": "magnum-12b-v2.5-kto-Q4_K_M.gguf",
+        "hf_model": "anthracite-org/magnum-v2.5-12b-kto",
+        "base_context": 4096,
+        "max_context": 16384,
+        "release_date": "July 2024",
+        "category": "Claude-like Persona & Prose",
+        "architecture": "Mistral Nemo + KTO Alignment",
+        "params": "12.2B Dense",
+        "notes": "Engineered by anthracite-org using Kahneman-Tversky Optimization (KTO) to replicate Claude 3 Opus's nuanced tone, intellectual cadence, and thoughtful pacing. Great at nuanced argumentation and essays. Best run with Min-P 0.05 and Temp 0.8.",
+        "strengths": [
+          "Claude 3 Opus tonal mimicry",
+          "Nuanced, multi-paragraph essays",
+          "High emotional IQ"
+        ],
+        "recommended_for": "Creative essays, nuanced debates, and premium conversational assistants",
+        "tags": [
+          "Claude 3 Persona",
+          "KTO Tuned",
+          "Creative"
+        ],
+        "sampling_profile": {
+          "temperature": 0.75,
+          "min_p": 0.1,
+          "top_k": 0,
+          "repeat_penalty": 1.05,
+          "notes": "Top-K disabled; rely on Min-P 0.10 for vibrant prose."
+        }
+      },
+      "mistral-nemo-12b": {
+        "name": "Mistral Nemo 12B Abliterated (128k)",
+        "weights_gb": 7.5,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/Mistral-Nemo-Instruct-2407-abliterated-GGUF",
+        "file": "Mistral-Nemo-Instruct-2407-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ3_M": "Mistral-Nemo-Instruct-2407-abliterated.IQ3_M.gguf",
+          "IQ3_S": "Mistral-Nemo-Instruct-2407-abliterated.IQ3_S.gguf",
+          "IQ3_XS": "Mistral-Nemo-Instruct-2407-abliterated.IQ3_XS.gguf",
+          "IQ4_XS": "Mistral-Nemo-Instruct-2407-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Mistral-Nemo-Instruct-2407-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Mistral-Nemo-Instruct-2407-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Mistral-Nemo-Instruct-2407-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Mistral-Nemo-Instruct-2407-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Mistral-Nemo-Instruct-2407-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Mistral-Nemo-Instruct-2407-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "Mistral-Nemo-Instruct-2407-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "Mistral-Nemo-Instruct-2407-abliterated.Q5_K_S.gguf",
+          "Q6_K": "Mistral-Nemo-Instruct-2407-abliterated.Q6_K.gguf",
+          "Q8_0": "Mistral-Nemo-Instruct-2407-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/Mistral-Nemo-Instruct-2407-GGUF",
+        "fallback_file": "Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+        "hf_model": "failspy/Mistral-Nemo-Instruct-2407-abliterated",
+        "base_context": 8192,
+        "max_context": 128000,
+        "release_date": "July 2024",
+        "category": "Long Context Reasoning & Analysis",
+        "architecture": "Mistral Nemo Dense Transformer",
+        "params": "12.2B Dense",
+        "notes": "Created jointly by Mistral AI and NVIDIA. Features the Tekken tokenizer with massive multilingual and code vocabulary compression. 128k context makes it unbeatable for ingesting massive documentation sets on a Single T4 GPU.",
+        "strengths": [
+          "128k token context window",
+          "Tekken efficient tokenizer",
+          "Strong multi-lingual reasoning"
+        ],
+        "recommended_for": "Full repo audits, research paper synthesis, and massive text parsing",
+        "tags": [
+          "128k Long Context",
+          "Logical Reasoning"
+        ]
+      },
+      "qwen2.5-coder-14b": {
+        "name": "Qwen 2.5 Coder 14B Instruct Abliterated",
+        "weights_gb": 9.4,
+        "quant": "Q4_K_M / NF4",
+        "repo": "mradermacher/Qwen2.5-Coder-14B-Instruct-abliterated-GGUF",
+        "file": "Qwen2.5-Coder-14B-Instruct-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "Qwen2.5-Coder-14B-Instruct-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Qwen2.5-Coder-14B-Instruct-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Qwen2.5-Coder-14B-Instruct-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Qwen2.5-Coder-14B-Instruct-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Qwen2.5-Coder-14B-Instruct-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Qwen2.5-Coder-14B-Instruct-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Qwen2.5-Coder-14B-Instruct-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "Qwen2.5-Coder-14B-Instruct-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "Qwen2.5-Coder-14B-Instruct-abliterated.Q5_K_S.gguf",
+          "Q6_K": "Qwen2.5-Coder-14B-Instruct-abliterated.Q6_K.gguf",
+          "Q8_0": "Qwen2.5-Coder-14B-Instruct-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+        "fallback_file": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+        "hf_model": "ikarius/Qwen2.5-Coder-14B-Instruct-Abliterated-NF4",
+        "base_context": 4096,
+        "max_context": 32768,
+        "release_date": "October 2024",
+        "category": "Autonomous Coding Agent (Leader)",
+        "architecture": "Qwen 2.5 Dense Transformer",
+        "params": "14.7B Dense",
+        "notes": "The absolute benchmark leader for local agentic coding. Outperforms GPT-4o-mini and Claude 3.5 Haiku on HumanEval and MultiPL-E. Perfectly matches OpenHands, Aider, and SWE-agent diff-editing workflows. Fits cleanly in 14.5GB VRAM on Colab Single T4 with 16k context.",
+        "strengths": [
+          "#1 open-weight coding model under 30B",
+          "Flawless multi-file diff generation",
+          "32k context with YaRN scaling"
+        ],
+        "recommended_for": "Primary autonomous software engineering and multi-file refactoring",
+        "tags": [
+          "Agent Coding Leader",
+          "OpenHands / Aider",
+          "SDPA Optimized"
+        ],
+        "kv_geometry": {},
+        "sampling_profile": {
+          "temperature": 0.25,
+          "min_p": 0.05,
+          "top_k": 40,
+          "repeat_penalty": 1.05,
+          "notes": "Low temperature for deterministic coding & diffs."
+        }
+      },
+      "deepseek-r1-14b": {
+        "name": "DeepSeek R1 Distill Qwen 14B Abliterated",
+        "weights_gb": 9.4,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/DeepSeek-R1-Distill-Qwen-14B-abliterated-GGUF",
+        "file": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "DeepSeek-R1-Distill-Qwen-14B-abliterated.IQ4_XS.gguf",
+          "Q2_K": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q2_K.gguf",
+          "Q3_K_L": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q5_K_S.gguf",
+          "Q6_K": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q6_K.gguf",
+          "Q8_0": "DeepSeek-R1-Distill-Qwen-14B-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF",
+        "fallback_file": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        "hf_model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        "base_context": 4096,
+        "max_context": 32768,
+        "release_date": "January 2025",
+        "category": "Frontier Deep Reasoning & Logic",
+        "architecture": "Qwen 2.5 Transformer + R1 Distillation",
+        "params": "14.7B Dense",
+        "notes": "The most powerful reasoning model that can run natively in a Single T4 GPU. Emits deep recursive self-checking chains inside <think> tags. Abliteration prevents refusal on edge research topics. Surpasses OpenAI o1-preview on several math benchmarks.",
+        "strengths": [
+          "Autonomous self-correction in <think>",
+          "Phenomenal algorithm synthesis",
+          "Abliterated uncensored thinking"
+        ],
+        "recommended_for": "Complex architectural planning, mathematical proofs, and tricky bug diagnosis",
+        "tags": [
+          "Deep Reasoning",
+          "<think> Trace",
+          "Math & Logic"
+        ]
+      },
+      "gemma-2-27b": {
+        "name": "Gemma 2 27B IT Abliterated",
+        "weights_gb": 16.2,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/gemma-2-27b-it-abliterated-GGUF",
+        "file": "gemma-2-27b-it-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "gemma-2-27b-it-abliterated.IQ4_XS.gguf",
+          "Q2_K": "gemma-2-27b-it-abliterated.Q2_K.gguf",
+          "Q3_K_L": "gemma-2-27b-it-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "gemma-2-27b-it-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "gemma-2-27b-it-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "gemma-2-27b-it-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "gemma-2-27b-it-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "gemma-2-27b-it-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "gemma-2-27b-it-abliterated.Q5_K_S.gguf",
+          "Q6_K": "gemma-2-27b-it-abliterated.Q6_K.gguf",
+          "Q8_0": "gemma-2-27b-it-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/gemma-2-27b-it-GGUF",
+        "fallback_file": "gemma-2-27b-it-Q4_K_M.gguf",
+        "hf_model": "failspy/gemma-2-27b-it-abliterated",
+        "base_context": 4096,
+        "max_context": 8192,
+        "release_date": "July 2024",
+        "category": "Frontier Heavyweight Reasoning",
+        "architecture": "Gemma 2 Dense Transformer",
+        "params": "27.2B Dense",
+        "notes": "Google's 27B flagship model uncensored. Boasts cognitive depth rivaling 70B models with superior inference speed. Requires ~16.2GB VRAM: runs natively in pure VRAM on Kaggle Dual-T4 (50/50 split) or on Colab GPU with 'Extend to RAM' enabled.",
+        "strengths": [
+          "Near-70B cognitive benchmark scores",
+          "Zero Google corporate disclaimers",
+          "High-density domain knowledge"
+        ],
+        "recommended_for": "Heavy reasoning on Kaggle Dual-T4 or Colab with Extend to RAM",
+        "tags": [
+          "Max Anti-Assistant",
+          "Kaggle 4-vCPU & Dual-T4"
+        ]
+      },
+      "qwen2.5-coder-32b": {
+        "name": "Qwen 2.5 Coder 32B Instruct Abliterated",
+        "weights_gb": 19.8,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/Qwen2.5-Coder-32B-Instruct-abliterated-GGUF",
+        "file": "Qwen2.5-Coder-32B-Instruct-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "Qwen2.5-Coder-32B-Instruct-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Qwen2.5-Coder-32B-Instruct-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Qwen2.5-Coder-32B-Instruct-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Qwen2.5-Coder-32B-Instruct-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Qwen2.5-Coder-32B-Instruct-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Qwen2.5-Coder-32B-Instruct-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Qwen2.5-Coder-32B-Instruct-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "Qwen2.5-Coder-32B-Instruct-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "Qwen2.5-Coder-32B-Instruct-abliterated.Q5_K_S.gguf",
+          "Q6_K": "Qwen2.5-Coder-32B-Instruct-abliterated.Q6_K.gguf",
+          "Q8_0": "Qwen2.5-Coder-32B-Instruct-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
+        "fallback_file": "qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+        "hf_model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+        "base_context": 4096,
+        "max_context": 32768,
+        "release_date": "November 2024",
+        "category": "Frontier Heavyweight Coding SOTA",
+        "architecture": "Qwen 2.5 Dense Transformer",
+        "params": "32.5B Dense",
+        "notes": "The absolute world #1 open-weight coding model. Matches GPT-4o on coding benchmarks. Fits comfortably across Kaggle Dual-T4 GPUs (~10GB per card) or in Colab with Extend to RAM. If you have Dual-T4 hardware, this is the ultimate coding runner.",
+        "strengths": [
+          "Parity with GPT-4o on code generation",
+          "Handles full repository refactors",
+          "Clean native 32k context"
+        ],
+        "recommended_for": "Enterprise-grade codebase generation on Kaggle Dual-T4",
+        "tags": [
+          "Elite Coding SOTA",
+          "Dual-T4 Native",
+          "Colab with RAM Extend"
+        ],
+        "sampling_profile": {
+          "temperature": 0.25,
+          "min_p": 0.05,
+          "top_k": 40,
+          "repeat_penalty": 1.05,
+          "notes": "Low temperature for deterministic coding & diffs."
+        }
+      },
+      "qwen3.8-35b-uncensored": {
+        "name": "Qwen 3.8 35B A3B Distill APEX-I Abliterated",
+        "weights_gb": 13.7,
+        "quant": "Q3_K_M",
+        "repo": "IsValorum/Qwen3.8-35B-A3B-Distill-MTP-APEX-I-MiniPlus-V2.1-Abliterated-GGUF",
+        "file": "Qwen3.8-35B-A3B-Distill.APEX-I-MiniPlus-V2.1-Abliterated.gguf",
+        "quant_files": {
+          "Q3_K_M": "Qwen3.8-35B-A3B-Distill.APEX-I-MiniPlus-V2.1-Abliterated.gguf"
+        },
+        "fallback_repo": "mradermacher/Qwen2.5-32B-Instruct-abliterated-GGUF",
+        "fallback_file": "Qwen2.5-32B-Instruct-abliterated.Q4_K_M.gguf",
+        "hf_model": "IsValorum/Qwen3.8-35B-A3B-Distill-MTP-APEX-I-MiniPlus-V2.1-Abliterated",
+        "base_context": 4096,
+        "max_context": 262144,
+        "release_date": "September 2026",
+        "category": "Hybrid Linear Attention + MoE",
+        "architecture": "DeltaNet Hybrid Linear Attention + Sparse MoE",
+        "params": "35.2B Total / 3.8B Active (MoE)",
+        "notes": "Next-generation hybrid architecture: features a DeltaNet linear attention backbone coupled with sparse MoE routing. 35B total capacity but only activates 3.8B parameters per token, delivering the speed of a tiny model with the cognitive depth of 35B. Fits into ~13.7GB VRAM.",
+        "strengths": [
+          "Only 3.8B active parameters (high tok/s)",
+          "35B total parameter knowledge depth",
+          "DeltaNet sub-quadratic scaling"
+        ],
+        "recommended_for": "High-throughput frontier reasoning on Single T4 or Dual-T4",
+        "tags": [
+          "35B Reasoning",
+          "Dual-T4 50/50 Split",
+          "Uncensored"
+        ],
+        "kv_geometry": {},
+        "sampling_profile": {
+          "temperature": 0.6,
+          "min_p": 0.08,
+          "top_k": 30,
+          "repeat_penalty": 1.08,
+          "notes": "Reasoning MoE; keep temp low to prevent routing thrashing."
+        }
+      },
+      "qwen3.6-35b-a3b-abliterated": {
+        "name": "Qwen 3.6 35B A3B Abliterated (MoE)",
+        "weights_gb": 18.73,
+        "quant": "IQ4_XS",
+        "repo": "mradermacher/Huihui-Qwen3.6-35B-A3B-abliterated-i1-GGUF",
+        "file": "Huihui-Qwen3.6-35B-A3B-abliterated.i1-IQ4_XS.gguf",
+        "quant_files": {
+          "IQ4_XS": "Huihui-Qwen3.6-35B-A3B-abliterated.i1-IQ4_XS.gguf",
+          "Q4_0": "Huihui-Qwen3.6-35B-A3B-abliterated.i1-Q4_0.gguf",
+          "Q6_K": "Huihui-Qwen3.6-35B-A3B-abliterated.i1-Q6_K.gguf",
+          "Q8_0": "Huihui-Qwen3.6-35B-A3B-abliterated.i1-Q8_0.gguf"
+        },
+        "fallback_repo": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF",
+        "fallback_file": "Huihui-Qwen3.6-35B-A3B-abliterated-ggml-model-Q4_K.gguf",
+        "hf_model": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated",
+        "base_context": 32768,
+        "max_context": 131072,
+        "release_date": "October 2026",
+        "category": "Hybrid Linear Attention + Sparse MoE",
+        "architecture": "Gated DeltaNet Hybrid Linear Attention + Sparse MoE",
+        "params": "35.0B Total / 3.0B Active (MoE)",
+        "notes": "High-velocity 35B Sparse MoE: 35.0B total parameters with only 3.0B active parameters per token. Blazing-fast generation on CPU (24\u201338+ tok/s with ik_llama.cpp -rtr -fmoe) while leaving over 32 GB RAM headroom for 128k context on Colab High-RAM.",
+        "strengths": [
+          "Only 3.0B active parameters (~24-38 tok/s on CPU)",
+          "128k context support",
+          "Uncensored abliterated weights"
+        ],
+        "recommended_for": "Fastest 30B+ interactive coding and long-context analysis on Colab High-RAM CPU",
+        "tags": [
+          "35B MoE",
+          "Abliterated",
+          "CPU Turbo",
+          "128K Context"
+        ]
+      },
+      "qwen3-coder-next-80b-a3b-abliterated": {
+        "name": "Qwen 3 Coder Next 80B A3B Abliterated (MoE)",
+        "weights_gb": 35.07,
+        "quant": "IQ3_M",
+        "repo": "mradermacher/Huihui-Qwen3-Coder-Next-abliterated-i1-GGUF",
+        "file": "Huihui-Qwen3-Coder-Next-abliterated.i1-IQ3_M.gguf",
+        "quant_files": {
+          "IQ3_M": "Huihui-Qwen3-Coder-Next-abliterated.i1-IQ3_M.gguf",
+          "IQ4_XS": "Huihui-Qwen3-Coder-Next-abliterated.i1-IQ4_XS.gguf",
+          "Q4_0": "Huihui-Qwen3-Coder-Next-abliterated.i1-Q4_0.gguf"
+        },
+        "fallback_repo": "bartowski/huihui-ai_Qwen3-Coder-Next-abliterated-GGUF",
+        "fallback_file": "huihui-ai_Qwen3-Coder-Next-abliterated-IQ3_M.gguf",
+        "hf_model": "huihui-ai/Qwen3-Coder-Next-abliterated",
+        "base_context": 16384,
+        "max_context": 65536,
+        "release_date": "October 2026",
+        "category": "Flagship 80B Coding MoE",
+        "architecture": "Gated DeltaNet Hybrid Linear Attention + Sparse MoE",
+        "params": "80.0B Total / 3.0B Active (MoE)",
+        "notes": "Flagship 80B coding architecture fitting into 51GB RAM. Holds 80B total parameters while activating only 3.0B parameters (3.75% of weights) per token. Runs at 18\u201326+ tok/s on CPU with ik_llama.cpp fused DeltaNet kernels.",
+        "strengths": [
+          "80B parameter coding depth",
+          "Only 3.0B active params (18-26 tok/s on CPU)",
+          "Fits in 51GB RAM"
+        ],
+        "recommended_for": "Frontier-class coding and complex refactoring on Colab High-RAM CPU",
+        "tags": [
+          "80B MoE",
+          "Coding Flagship",
+          "Abliterated",
+          "CPU Turbo"
+        ]
+      },
+      "llama-3.3-70b-instruct": {
+        "name": "Llama 3.3 70B Instruct (Q3_K_S)",
+        "weights_gb": 26.5,
+        "quant": "Q3_K_S",
+        "repo": "mradermacher/Llama-3.3-70B-Instruct-GGUF",
+        "file": "Llama-3.3-70B-Instruct.Q3_K_S.gguf",
+        "quant_files": {
+          "IQ4_XS": "Llama-3.3-70B-Instruct.IQ4_XS.gguf",
+          "Q2_K": "Llama-3.3-70B-Instruct.Q2_K.gguf",
+          "Q3_K_L": "Llama-3.3-70B-Instruct.Q3_K_L.gguf",
+          "Q3_K_M": "Llama-3.3-70B-Instruct.Q3_K_M.gguf",
+          "Q3_K_S": "Llama-3.3-70B-Instruct.Q3_K_S.gguf",
+          "Q4_K_M": "Llama-3.3-70B-Instruct.Q4_K_M.gguf",
+          "Q4_K_S": "Llama-3.3-70B-Instruct.Q4_K_S.gguf",
+          "Q5_K_M": "Llama-3.3-70B-Instruct.Q5_K_M.gguf",
+          "Q5_K_S": "Llama-3.3-70B-Instruct.Q5_K_S.gguf"
+        },
+        "fallback_repo": "bartowski/Llama-3.3-70B-Instruct-GGUF",
+        "fallback_file": "Llama-3.3-70B-Instruct-Q3_K_S.gguf",
+        "hf_model": "meta-llama/Llama-3.3-70B-Instruct",
+        "base_context": 4096,
+        "max_context": 16384,
+        "release_date": "December 2024",
+        "category": "Frontier 70B Flagship",
+        "architecture": "Llama 3.3 Dense Transformer",
+        "params": "70.6B Dense",
+        "notes": "Meta's flagship 70B model quantized to Q3_K_S (26.5GB). Fits natively inside Kaggle Dual Tesla T4 GPUs (30.72GB total VRAM) with ~4GB headroom remaining. Unmatched architectural synthesis, system design planning, and multi-step reasoning.",
+        "strengths": [
+          "70B parameter frontier reasoning",
+          "100% fits into Kaggle Dual-T4 VRAM",
+          "Superior planning and architectural design"
+        ],
+        "recommended_for": "Kaggle Dual-T4 maximum intelligence and deep system architecture",
+        "tags": [
+          "70B Frontier",
+          "Kaggle Dual-T4 Fit",
+          "Architecture & Planning"
+        ]
+      },
+      "mistral-small-24b-abliterated": {
+        "name": "Mistral Small 24B Instruct Abliterated",
+        "weights_gb": 14.3,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/Mistral-Small-24B-Instruct-2501-abliterated-GGUF",
+        "file": "Mistral-Small-24B-Instruct-2501-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "Mistral-Small-24B-Instruct-2501-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Mistral-Small-24B-Instruct-2501-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Mistral-Small-24B-Instruct-2501-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Mistral-Small-24B-Instruct-2501-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Mistral-Small-24B-Instruct-2501-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Mistral-Small-24B-Instruct-2501-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Mistral-Small-24B-Instruct-2501-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "Mistral-Small-24B-Instruct-2501-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "Mistral-Small-24B-Instruct-2501-abliterated.Q5_K_S.gguf",
+          "Q6_K": "Mistral-Small-24B-Instruct-2501-abliterated.Q6_K.gguf",
+          "Q8_0": "Mistral-Small-24B-Instruct-2501-abliterated.Q8_0.gguf"
+        },
+        "fallback_repo": "bartowski/Mistral-Small-24B-Instruct-2501-GGUF",
+        "fallback_file": "Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf",
+        "hf_model": "huihui-ai/Mistral-Small-24B-Instruct-2501-abliterated",
+        "base_context": 8192,
+        "max_context": 32768,
+        "release_date": "January 2025",
+        "category": "Frontier 24B General & Fiction SOTA",
+        "architecture": "Mistral Small Dense Transformer (24B)",
+        "params": "23.6B Dense",
+        "notes": "The ideal sweet-spot model between 14B and 70B. Features Mistral's latest 24B architecture abliterated to completely eradicate preachy refusal guardrails. Beats legacy Llama 3 70B on reasoning and coding while fitting into ~14.3GB VRAM in Q4_K_M. Fits 100% on a Single T4 GPU with 8k-16k context, or across Kaggle Dual-T4 with 32k context.",
+        "strengths": [
+          "#1 open-weight 24B architecture",
+          "Zero refusal guardrails",
+          "Superior prose and coding logic"
+        ],
+        "recommended_for": "Primary fiction engine, visual novel dialogue, and high-complexity agentic coding",
+        "tags": [
+          "24B SOTA",
+          "Zero Refusals",
+          "Single T4 / Dual T4"
+        ],
+        "kv_geometry": {}
+      },
+      "clara-24b": {
+        "name": "Clara 24B (Sao10K Dataset Fiction Engine)",
+        "weights_gb": 14.3,
+        "quant": "Q4_K_M",
+        "repo": "mradermacher/Clara-24B-GGUF",
+        "file": "Clara-24B.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "Clara-24B.IQ4_XS.gguf",
+          "Q2_K": "Clara-24B.Q2_K.gguf",
+          "Q3_K_L": "Clara-24B.Q3_K_L.gguf",
+          "Q3_K_M": "Clara-24B.Q3_K_M.gguf",
+          "Q3_K_S": "Clara-24B.Q3_K_S.gguf",
+          "Q4_K_M": "Clara-24B.Q4_K_M.gguf",
+          "Q4_K_S": "Clara-24B.Q4_K_S.gguf",
+          "Q5_K_M": "Clara-24B.Q5_K_M.gguf",
+          "Q5_K_S": "Clara-24B.Q5_K_S.gguf",
+          "Q6_K": "Clara-24B.Q6_K.gguf",
+          "Q8_0": "Clara-24B.Q8_0.gguf"
+        },
+        "fallback_repo": "mradermacher/Clara-24B-i1-GGUF",
+        "fallback_file": "Clara-24B.i1-Q4_K_M.gguf",
+        "hf_model": "ayan4m1/Clara-24B",
+        "base_context": 8192,
+        "max_context": 32768,
+        "release_date": "February 2025",
+        "category": "Deep Creative Fiction & Visual Novel RP",
+        "architecture": "Mistral Small 24B + Sao10K Fine-Tune",
+        "params": "23.6B Dense",
+        "notes": "Fine-tuned specifically on Sao10K Claude-3-Opus style fiction and dialogue datasets. Unmatched richness in prose, psychological tension, multi-character party dynamics, and mature scene pacing. Designed specifically for long-form visual novels and interactive storytelling.",
+        "strengths": [
+          "Claude-3-Opus prose fidelity",
+          "Deep emotional character subtext",
+          "Uncensored visual novel narrative"
+        ],
+        "recommended_for": "Visual novel script writing, mature romance/drama scenes, and complex character roleplay",
+        "tags": [
+          "Visual Novel RP",
+          "Sao10K Dataset",
+          "Uncensored Fiction"
+        ]
+      },
+      "lunaris-8b": {
+        "name": "L3 8B Lunaris v1 (Sao10K Dialogue)",
+        "weights_gb": 4.9,
+        "quant": "Q4_K_M",
+        "repo": "bartowski/L3-8B-Lunaris-v1-GGUF",
+        "file": "L3-8B-Lunaris-v1-Q4_K_M.gguf",
+        "quant_files": {
+          "IQ2_M": "L3-8B-Lunaris-v1-IQ2_M.gguf",
+          "IQ3_M": "L3-8B-Lunaris-v1-IQ3_M.gguf",
+          "IQ3_XS": "L3-8B-Lunaris-v1-IQ3_XS.gguf",
+          "IQ4_XS": "L3-8B-Lunaris-v1-IQ4_XS.gguf",
+          "Q2_K": "L3-8B-Lunaris-v1-Q2_K.gguf",
+          "Q3_K_L": "L3-8B-Lunaris-v1-Q3_K_L.gguf",
+          "Q3_K_M": "L3-8B-Lunaris-v1-Q3_K_M.gguf",
+          "Q3_K_S": "L3-8B-Lunaris-v1-Q3_K_S.gguf",
+          "Q4_K_M": "L3-8B-Lunaris-v1-Q4_K_M.gguf",
+          "Q4_K_S": "L3-8B-Lunaris-v1-Q4_K_S.gguf",
+          "Q5_K_M": "L3-8B-Lunaris-v1-Q5_K_M.gguf",
+          "Q5_K_S": "L3-8B-Lunaris-v1-Q5_K_S.gguf",
+          "Q6_K": "L3-8B-Lunaris-v1-Q6_K.gguf",
+          "Q8_0": "L3-8B-Lunaris-v1-Q8_0.gguf"
+        },
+        "fallback_repo": "mradermacher/L3-8B-Lunaris-v1-GGUF",
+        "fallback_file": "L3-8B-Lunaris-v1.Q4_K_M.gguf",
+        "hf_model": "Sao10K/L3-8B-Lunaris-v1",
+        "base_context": 4096,
+        "max_context": 16384,
+        "release_date": "July 2024",
+        "category": "Real-Time NPC Dialogue & Rapid Roleplay",
+        "architecture": "Llama 3 Dense Transformer + Sao10K Alignment",
+        "params": "8.03B Dense",
+        "notes": "Sao10K's ultra-responsive roleplay model. Blisteringly fast (~60 tok/s on T4, 20 tok/s on CPU). Highly expressive and completely devoid of corporate clich\u00e9s. Perfect for real-time game NPC banter, interactive dialogue trees, and low-latency banter.",
+        "strengths": [
+          "Sub-20ms latency on T4",
+          "Runs at 20 tok/s on 4-vCPU RAM",
+          "Vibrant personality and banter"
+        ],
+        "recommended_for": "Real-time game NPC dialogue, lightweight fiction, and responsive chat",
+        "tags": [
+          "Fast NPC Dialogue",
+          "Sao10K RP",
+          "CPU & T4 Ready"
+        ]
+      },
+      "euryale-70b": {
+        "name": "L3.3 70B Euryale v2.3 (Sao10K Uncensored Flagship)",
+        "weights_gb": 26.3,
+        "quant": "IQ3_M / Q2_K",
+        "repo": "bartowski/L3.3-70B-Euryale-v2.3-GGUF",
+        "file": "L3.3-70B-Euryale-v2.3-Q2_K.gguf",
+        "quant_files": {
+          "IQ2_M": "L3.3-70B-Euryale-v2.3-IQ2_M.gguf",
+          "IQ3_M": "L3.3-70B-Euryale-v2.3-IQ3_M.gguf",
+          "IQ4_XS": "L3.3-70B-Euryale-v2.3-IQ4_XS.gguf",
+          "Q2_K": "L3.3-70B-Euryale-v2.3-Q2_K.gguf",
+          "Q3_K_L": "L3.3-70B-Euryale-v2.3-Q3_K_L.gguf",
+          "Q3_K_M": "L3.3-70B-Euryale-v2.3-Q3_K_M.gguf",
+          "Q3_K_S": "L3.3-70B-Euryale-v2.3-Q3_K_S.gguf",
+          "Q4_0": "L3.3-70B-Euryale-v2.3-Q4_0.gguf",
+          "Q4_K_M": "L3.3-70B-Euryale-v2.3-Q4_K_M.gguf",
+          "Q4_K_S": "L3.3-70B-Euryale-v2.3-Q4_K_S.gguf",
+          "Q5_K_S": "L3.3-70B-Euryale-v2.3-Q5_K_S.gguf"
+        },
+        "fallback_repo": "bartowski/L3.3-70B-Euryale-v2.3-GGUF",
+        "fallback_file": "L3.3-70B-Euryale-v2.3-IQ3_M.gguf",
+        "hf_model": "Sao10K/L3.3-70B-Euryale-v2.3",
+        "base_context": 4096,
+        "max_context": 32768,
+        "release_date": "December 2024",
+        "category": "Frontier 70B Creative Literature & Mature VN",
+        "architecture": "Llama 3.3 70B + Sao10K Uncensored Fine-Tune",
+        "params": "70.6B Dense",
+        "notes": "The crowning jewel of open-weight creative writing. Built upon Llama 3.3 70B with Sao10K's signature uncensored narrative tuning. Delivers book-length narrative coherence, complex thematic depth, and nuanced dialogue. Quantized to fit within Kaggle's 30.7 GB Dual-T4 VRAM.",
+        "strengths": [
+          "70B parameter literary prose",
+          "100% uncensored maturity handling",
+          "Fits into Kaggle Dual-T4 VRAM"
+        ],
+        "recommended_for": "Kaggle Dual-T4 epic visual novel generation, intricate world-building, and high-literature storylines",
+        "tags": [
+          "70B Flagship",
+          "Kaggle Dual-T4",
+          "Sao10K Apex"
+        ]
+      },
+      "glm-320b-moe": {
+        "name": "GLM 320B MoE (JAX/Pallas)",
+        "weights_gb": 58.0,
+        "quant": "4-bit JAX",
+        "runtime": "jax_tpu",
+        "tpu_only": true,
+        "repo": "zai-org/GLM-4.5",
+        "file": "model.safetensors.index.json",
+        "fallback_repo": "zai-org/GLM-4.5",
+        "fallback_file": "config.json",
+        "hf_model": "zai-org/GLM-4.5",
+        "base_context": 8192,
+        "max_context": 262144,
+        "release_date": "August 2024",
+        "category": "Kaggle TPU Giant MoE",
+        "architecture": "320B Sparse MoE (JAX/Pallas Paged Attention)",
+        "params": "320B Total / ~32B Active",
+        "notes": "Designed strictly for Kaggle TPU v3-8 (64GB HBM) using custom JAX/Pallas kernels (not llama.cpp GGUF). Cannot be loaded on standard T4 GPUs or CPU.",
+        "strengths": [
+          "64 tok/s on TPU v3-8",
+          "262k long context window",
+          "Massive MoE capacity"
+        ],
+        "recommended_for": "Kaggle TPU v3-8 high-throughput long context workflows",
+        "tags": [
+          "TPU v3-8 Only",
+          "JAX/Pallas",
+          "262k Long Context"
+        ]
+      },
+      "qwen2.5-72b-abliterated": {
+        "name": "Qwen 2.5 72B Instruct Abliterated (FP8 / AWQ)",
+        "weights_gb": 42.0,
+        "quant": "FP8 / Q4_K_M",
+        "repo": "mradermacher/Qwen2.5-72B-Instruct-abliterated-GGUF",
+        "file": "Qwen2.5-72B-Instruct-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "Qwen2.5-72B-Instruct-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Qwen2.5-72B-Instruct-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Qwen2.5-72B-Instruct-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Qwen2.5-72B-Instruct-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Qwen2.5-72B-Instruct-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Qwen2.5-72B-Instruct-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Qwen2.5-72B-Instruct-abliterated.Q4_K_S.gguf"
+        },
+        "fallback_repo": "bartowski/Qwen2.5-72B-Instruct-GGUF",
+        "fallback_file": "Qwen2.5-72B-Instruct-Q4_K_M.gguf",
+        "hf_model": "huihui-ai/Qwen2.5-72B-Instruct-abliterated",
+        "base_context": 8192,
+        "max_context": 32768,
+        "release_date": "September 2024",
+        "category": "Frontier 72B Flagship SOTA",
+        "architecture": "Qwen 2.5 Dense Transformer",
+        "params": "72.7B Dense",
+        "notes": "The open-weight pinnacle. In FP8/AWQ (~42GB), it comfortably fits inside 1x A100-80GB or H100 with massive context headroom. Uncensored abliteration excises corporate preachiness while preserving elite coding and reasoning capabilities.",
+        "strengths": [
+          "World-class reasoning and multi-language logic",
+          "Abliterated zero-refusal alignment",
+          "Fits cleanly in Modal A100-80GB / H100"
+        ],
+        "recommended_for": "Modal A100-80GB / H100 high-throughput flagship agent workflows and deep system architecture",
+        "tags": [
+          "Modal A100/H100",
+          "72B SOTA",
+          "Abliterated Flagship"
+        ]
+      },
+      "llama-3.3-70b-abliterated": {
+        "name": "Llama 3.3 70B Instruct Abliterated (FP8 / Q4)",
+        "weights_gb": 39.5,
+        "quant": "FP8 / Q4_K_M",
+        "repo": "mradermacher/Llama-3.3-70B-Instruct-abliterated-GGUF",
+        "file": "Llama-3.3-70B-Instruct-abliterated.Q4_K_M.gguf",
+        "quant_files": {
+          "IQ4_XS": "Llama-3.3-70B-Instruct-abliterated.IQ4_XS.gguf",
+          "Q2_K": "Llama-3.3-70B-Instruct-abliterated.Q2_K.gguf",
+          "Q3_K_L": "Llama-3.3-70B-Instruct-abliterated.Q3_K_L.gguf",
+          "Q3_K_M": "Llama-3.3-70B-Instruct-abliterated.Q3_K_M.gguf",
+          "Q3_K_S": "Llama-3.3-70B-Instruct-abliterated.Q3_K_S.gguf",
+          "Q4_K_M": "Llama-3.3-70B-Instruct-abliterated.Q4_K_M.gguf",
+          "Q4_K_S": "Llama-3.3-70B-Instruct-abliterated.Q4_K_S.gguf",
+          "Q5_K_M": "Llama-3.3-70B-Instruct-abliterated.Q5_K_M.gguf",
+          "Q5_K_S": "Llama-3.3-70B-Instruct-abliterated.Q5_K_S.gguf"
+        },
+        "fallback_repo": "bartowski/Llama-3.3-70B-Instruct-GGUF",
+        "fallback_file": "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+        "hf_model": "huihui-ai/Llama-3.3-70B-Instruct-abliterated",
+        "base_context": 8192,
+        "max_context": 32768,
+        "release_date": "December 2024",
+        "category": "Frontier 70B Uncensored Flagship",
+        "architecture": "Llama 3.3 Dense Transformer",
+        "params": "70.6B Dense",
+        "notes": "Meta's flagship 70B distilled with abliterated refusal vectors. Zero preachiness, pristine JSON tool schema compliance, and human-like natural prose. Requires ~40GB VRAM.",
+        "strengths": [
+          "70B parameter frontier reasoning",
+          "Completely unconstrained creative & coding intelligence",
+          "Runs on Modal A100-80GB / H100"
+        ],
+        "recommended_for": "Modal A100/H100 heavy enterprise development, novel generation, and autonomous agents",
+        "tags": [
+          "Modal A100/H100",
+          "70B Abliterated",
+          "Enterprise SOTA"
+        ]
+      },
+      "command-r-plus-104b": {
+        "name": "Command R+ 104B Uncensored (Q3_K_S GGUF)",
+        "weights_gb": 48.0,
+        "quant": "Q3_K_S",
+        "repo": "mradermacher/c4ai-command-r-plus-08-2024-GGUF",
+        "file": "c4ai-command-r-plus-08-2024.Q3_K_S.gguf",
+        "quant_files": {
+          "Q3_K_S": "c4ai-command-r-plus-08-2024.Q3_K_S.gguf",
+          "Q2_K": "c4ai-command-r-plus-08-2024.Q2_K.gguf",
+          "IQ3_M": "c4ai-command-r-plus-08-2024.IQ3_M.gguf",
+          "IQ3_S": "c4ai-command-r-plus-08-2024.IQ3_S.gguf",
+          "IQ3_XS": "c4ai-command-r-plus-08-2024.IQ3_XS.gguf"
+        },
+        "fallback_repo": "mradermacher/c4ai-command-r-plus-08-2024-GGUF",
+        "fallback_file": "c4ai-command-r-plus-08-2024.Q3_K_S.gguf",
+        "hf_model": "CohereForAI/c4ai-command-r-plus-08-2024",
+        "base_context": 8192,
+        "max_context": 128000,
+        "release_date": "August 2024",
+        "category": "Frontier 104B Multilingual RAG & Agent SOTA",
+        "architecture": "Command R+ Dense Transformer",
+        "params": "104B Dense",
+        "notes": "Cohere's 104B multilingual heavyweight. Purpose-built for multi-step tool use, RAG retrieval grounding, and citations. In FP8 (~59GB), runs on a single Modal A100-80GB or H100.",
+        "strengths": [
+          "128k context window",
+          "Native tool use & citation grounding",
+          "Fits in Modal A100-80GB"
+        ],
+        "recommended_for": "High-precision agentic retrieval, massive document synthesis, and multi-tool orchestration on Modal",
+        "tags": [
+          "Modal A100-80GB",
+          "104B Giant",
+          "RAG & Citations"
+        ]
+      },
+      "llama-3.1-405b-fp8": {
+        "name": "Llama 3.1 405B Instruct FP8 (8x H100 Giant)",
+        "weights_gb": 220.0,
+        "quant": "FP8",
+        "runtime": "vllm_fp8",
+        "requires_vllm": true,
+        "repo": "neuralmagic/Meta-Llama-3.1-405B-Instruct-FP8",
+        "file": "model.safetensors.index.json",
+        "fallback_repo": "neuralmagic/Meta-Llama-3.1-405B-Instruct-FP8",
+        "fallback_file": "config.json",
+        "hf_model": "neuralmagic/Meta-Llama-3.1-405B-Instruct-FP8",
+        "base_context": 8192,
+        "max_context": 32768,
+        "release_date": "July 2024",
+        "category": "Colossal 405B Frontier Superintelligence",
+        "architecture": "Llama 3.1 Dense Transformer",
+        "params": "405B Dense",
+        "notes": "The largest open-weight model on Earth. 405 billion dense parameters running in FP8 safetensors across an 8x H100 GPU cluster (640GB pool) via vLLM/SGLang (not single-file GGUF). Warning: Burns ~$31.60/hr ($0.00878/s) on Modal; enforce 15s scaledown window to protect credits.",
+        "strengths": [
+          "Frontier superintelligence matching top closed models",
+          "405B dense parameter world model",
+          "Multi-lingual & mathematical genius"
+        ],
+        "recommended_for": "Modal 8x H100 high-stakes architectural analysis and benchmark breakthroughs",
+        "tags": [
+          "Modal 8x H100 Only",
+          "405B Colossal",
+          "Superintelligence"
+        ]
+      },
+      "qwen3.8-27b-humanlike": {
+        "name": "Qwen 3.8 27B Humanlike Chat (IQ4_XS / Q4_K_M)",
+        "params": "27B",
+        "architecture": "Qwen3.8 Dense",
+        "quant": "IQ4_XS",
+        "weights_gb": 14.5,
+        "base_context": 32768,
+        "max_context": 32768,
+        "repo": "LessThanThreeAI/Qwen3.8-27B-Humanlike-Chat-GGUF",
+        "file": "Qwen3.8-27B-Humanlike-Chat-IQ4_XS.gguf",
+        "hf_model": "LessThanThreeAI/Qwen3.8-27B-Humanlike-Chat",
+        "recommended_for": "De-assistantized natural conversation on Kaggle Dual-T4 (16K-32K ctx, q4_0 KV)",
+        "tags": [
+          "de-assistantized",
+          "27b",
+          "dual-t4",
+          "humanlike"
+        ],
+        "sampling_profile": {
+          "temperature": 0.85,
+          "min_p": 0.07,
+          "top_k": 40,
+          "repeat_penalty": 1.12,
+          "notes": "De-assistantized humanlike prose; avoid assistant system boilerplate."
+        }
+      },
+      "ternary-bonsai-2-27b": {
+        "name": "PrismML Ternary Bonsai 2 27B (PQ2_0 / PTQ1_0)",
+        "params": "27B",
+        "architecture": "Sub-2-bit Ternary (requires PrismML llama.cpp fork)",
+        "quant": "PQ2_0",
+        "weights_gb": 5.8,
+        "base_context": 8192,
+        "max_context": 32768,
+        "repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+        "file": "Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "recommended_for": "27B intelligence fitting inside a single 16GB T4 GPU (<6 GB weights)",
+        "tags": [
+          "ternary",
+          "sub-2-bit",
+          "27b",
+          "single-t4"
+        ],
+        "sampling_profile": {
+          "temperature": 0.7,
+          "min_p": 0.08,
+          "top_k": 40,
+          "repeat_penalty": 1.08,
+          "notes": "Sub-2-bit ternary (PQ2_0/PTQ1_0); requires Min-P truncation + PrismML fork."
+        }
+      },
+      "orcabonsai-27b-uncensored": {
+        "name": "OrcaBonsai 27B Uncensored (Runtime Activation Steering)",
+        "params": "27B",
+        "architecture": "Qwen3.8 + OrcaRouter Activation Steering",
+        "quant": "Q4_K_M",
+        "weights_gb": 16.2,
+        "base_context": 16384,
+        "max_context": 32768,
+        "repo": "chimingw/Qwen3.8-27B-Uncensored-OrcaRouter-GGUF",
+        "file": "",
+        "recommended_for": "Zero weight-damage runtime refusal steering (y' = y - alpha*(y.r)r)",
+        "tags": [
+          "activation-steering",
+          "27b",
+          "dual-t4"
+        ],
+        "sampling_profile": {
+          "temperature": 0.7,
+          "min_p": 0.08,
+          "top_k": 40,
+          "repeat_penalty": 1.08,
+          "notes": "Runtime refusal-steering vector; throttle alpha->0.0 for JSON/math."
+        }
+      },
+      "qwen3-next-80b-a3b-abliterated": {
+        "name": "Qwen 3 Next 80B-A3B Instruct Abliterated (i1-IQ3_M / IQ4_XS)",
+        "params": "80B total / 3B active",
+        "architecture": "Gated DeltaNet + Sparse MoE",
+        "quant": "IQ3_M",
+        "weights_gb": 34.99,
+        "base_context": 32768,
+        "max_context": 65536,
+        "repo": "mradermacher/Huihui-Qwen3-Next-80B-A3B-Instruct-abliterated-i1-GGUF",
+        "file": "Huihui-Qwen3-Next-80B-A3B-Instruct-abliterated.i1-IQ3_M.gguf",
+        "recommended_for": "Colab High-RAM CPU (51 GB RAM) with ik_llama.cpp (-rtr -fmoe -muge)",
+        "tags": [
+          "moe",
+          "80b",
+          "ik_llama",
+          "avx512",
+          "abliterated"
+        ]
+      },
+      "qwen3-coder-30b-a3b-abliterated": {
+        "name": "Qwen 3 Coder 30B-A3B Instruct Abliterated (i1-IQ4_XS)",
+        "params": "30.5B total / 3.3B active",
+        "architecture": "Sparse MoE",
+        "quant": "IQ4_XS",
+        "weights_gb": 16.37,
+        "base_context": 32768,
+        "max_context": 131072,
+        "repo": "mradermacher/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated-i1-GGUF",
+        "file": "Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated.i1-IQ4_XS.gguf",
+        "recommended_for": "25-42 tok/s on 51GB AVX-512 CPU or Dual-T4 GPU",
+        "tags": [
+          "moe",
+          "coding",
+          "30b",
+          "ik_llama",
+          "dual-t4"
+        ]
+      },
+      "llama-4-scout-17b-16e-abliterated": {
+        "name": "Llama 4 Scout 17B-16E Instruct Abliterated v2 (i1-IQ3_XXS)",
+        "params": "109B total / 17B active",
+        "architecture": "Llama 4 MoE (16 experts)",
+        "quant": "IQ3_XXS",
+        "weights_gb": 41.66,
+        "base_context": 16384,
+        "max_context": 32768,
+        "repo": "mradermacher/Llama-4-Scout-17B-16E-Instruct-abliterated-v2-i1-GGUF",
+        "file": "Llama-4-Scout-17B-16E-Instruct-abliterated-v2.i1-IQ3_XXS.gguf",
+        "recommended_for": "Colab High-RAM CPU (51 GB RAM) via ik_llama.cpp -rtr",
+        "tags": [
+          "moe",
+          "109b",
+          "ik_llama",
+          "abliterated"
+        ]
+      },
+      "glm-4.5-air-106b-abliterated": {
+        "name": "GLM-4.5-Air 106B-A12B Abliterated (i1-Q2_K)",
+        "params": "106B total / 12B active",
+        "architecture": "GLM-4.5 MoE",
+        "quant": "Q2_K",
+        "weights_gb": 44.97,
+        "base_context": 16384,
+        "max_context": 32768,
+        "repo": "mradermacher/Huihui-GLM-4.5-Air-abliterated-lossytensors-i1-GGUF",
+        "file": "Huihui-GLM-4.5-Air-abliterated-lossytensors.i1-Q2_K.gguf",
+        "recommended_for": "Colab High-RAM CPU (51 GB RAM) via ik_llama.cpp -rtr",
+        "tags": [
+          "moe",
+          "106b",
+          "ik_llama",
+          "abliterated"
+        ]
+      }
+    },
+    "vision": {
+      "qwen2.5-vl-7b-abliterated": {
+        "name": "Qwen2.5-VL 7B Instruct Abliterated (SOTA Vision)",
+        "vram_gb": 8.8,
+        "repo": "huihui-ai/Qwen2.5-VL-7B-Instruct-abliterated",
+        "gguf_repo": "mradermacher/Qwen2.5-VL-7B-Instruct-abliterated-GGUF",
+        "file": "Qwen2.5-VL-7B-Instruct-abliterated.Q4_K_M.gguf",
+        "fallback_repo": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "release_date": "February 2025",
+        "category": "Frontier Uncensored Multimodal SOTA",
+        "architecture": "Qwen2.5 Transformer + Windowed NaViT ViT",
+        "params": "7.6B Parameters",
+        "notes": "The premier uncensored vision-language model. Abliteration removes all false refusal triggers on mature artwork, UI scraping, sensitive document OCR, and screen verification. Excels at high-resolution diagrams, complex math charts, code transcription, and full-screen GUI automation. Runs cleanly in 8.8GB VRAM or Host RAM.",
+        "strengths": [
+          "100% uncensored abliterated vision",
+          "World-class OCR and code from screenshots",
+          "Native arbitrary resolution without warping"
+        ],
+        "recommended_for": "Autonomous visual UI agents, complex document OCR, and unconstrained image inspection",
+        "tags": [
+          "Abliterated SOTA",
+          "Zero Refusal Vision",
+          "UI & OCR Leader"
+        ]
+      },
+      "qwen2.5-vl-7b": {
+        "name": "Qwen2.5-VL 7B Instruct (Official SOTA VLM)",
+        "vram_gb": 8.8,
+        "repo": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "release_date": "January 2025",
+        "category": "Frontier Dense Vision & UI Reasoning",
+        "architecture": "Qwen2.5 Transformer + Dynamic NaViT ViT",
+        "params": "7.6B Parameters",
+        "notes": "Alibaba's landmark multimodal foundation model. Industry-leading spatial coordinate grounding, dynamic image resolution handling, and dense chart/diagram comprehension. Runs in 8.8GB VRAM or Host RAM.",
+        "strengths": [
+          "Benchmark-topping vision reasoning",
+          "Native dynamic aspect ratios",
+          "Fine-grained UI bounding boxes"
+        ],
+        "recommended_for": "High-precision GUI automation, complex document OCR, and visual code generation",
+        "tags": [
+          "Official SOTA",
+          "8.8GB VRAM",
+          "NaViT Dynamic"
+        ]
+      },
+      "qwen2.5-vl-3b-abliterated": {
+        "name": "Qwen2.5-VL 3B Instruct Abliterated (Compact SOTA)",
+        "vram_gb": 5.5,
+        "repo": "huihui-ai/Qwen2.5-VL-3B-Instruct-abliterated",
+        "gguf_repo": "mradermacher/Qwen2.5-VL-3B-Instruct-abliterated-GGUF",
+        "file": "Qwen2.5-VL-3B-Instruct-abliterated.Q4_K_M.gguf",
+        "fallback_repo": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "release_date": "February 2025",
+        "category": "Compact Uncensored Multimodal",
+        "architecture": "Qwen2.5 Transformer + Windowed NaViT ViT",
+        "params": "3.0B Parameters",
+        "notes": "Ultra-efficient 3B vision model with complete abliteration. Zero refusal on adult art, cybersecurity diagrams, or raw screenshots. Requires only ~5.5GB VRAM, allowing it to co-exist alongside 7B or 14B text models on a Single T4 GPU without memory eviction.",
+        "strengths": [
+          "Zero corporate refusals",
+          "Low 5.5GB VRAM footprint",
+          "Sub-150ms visual inspection speed"
+        ],
+        "recommended_for": "Low-latency visual QA, rapid screen audits, and dual-model T4 execution",
+        "tags": [
+          "Abliterated Compact",
+          "Fast VLM",
+          "5.5GB VRAM"
+        ]
+      },
+      "llama-3.2-11b-vision-abliterated": {
+        "name": "Llama 3.2 11B Vision Instruct Abliterated",
+        "vram_gb": 9.2,
+        "repo": "case01/Llama-3.2-11B-Vision-Instruct-abliterated-gguf",
+        "file": "llama-3.2-11B-vision_Q8_0.gguf",
+        "fallback_repo": "city96/Llama-3.2-11B-Vision-Instruct-GGUF",
+        "fallback_file": "Llama-3.2-11B-Vision-Instruct-Q4_K_M.gguf",
+        "hf_model": "meta-llama/Llama-3.2-11B-Vision-Instruct",
+        "release_date": "October 2024",
+        "category": "Frontier Open Uncensored Vision",
+        "architecture": "Llama 3.2 Multimodal (Text + Cross-Attention Vision Adapter)",
+        "params": "10.6B Parameters",
+        "notes": "Meta's flagship 11B multimodal architecture with complete refusal vector removal. Solves Meta's gated model restriction by using public abliterated GGUF mirrors. Unmatched narrative prose quality when describing scenes, game CGs, and complex character illustrations.",
+        "strengths": [
+          "Rich conversational scene descriptions",
+          "Zero authentication / public mirror access",
+          "Abliterated zero-lecture tone"
+        ],
+        "recommended_for": "Visual novel CG critique, descriptive storytelling from images, and multi-turn visual chat",
+        "tags": [
+          "Meta Vision Abliterated",
+          "No Gated Auth",
+          "Rich Prose"
+        ]
+      },
+      "internvl2.5-8b": {
+        "name": "InternVL 2.5 8B (SOTA Dense Vision & OCR)",
+        "vram_gb": 8.5,
+        "repo": "OpenGVLab/InternVL2_5-8B",
+        "release_date": "December 2024",
+        "category": "High-Density Visual Reasoning & UI Grounding",
+        "architecture": "InternViT-6B + Qwen2.5-7B Multimodal Backbone",
+        "params": "8.1B Parameters",
+        "notes": "Benchmark champion on OCRBench v2 and DocVQA. Surpasses proprietary closed VLMs on tabular data extraction, code from complex IDE screenshots, and spatial bounding boxes. Exceptional precision for reading fine text in visual novel message logs and inspecting user interfaces.",
+        "strengths": [
+          "#1 Sub-10B OCR score",
+          "Pixel-perfect table and code extraction",
+          "Multi-image sequence comprehension"
+        ],
+        "recommended_for": "Dense document parsing, full UI layout inspection, and visual novel game audits",
+        "tags": [
+          "OCR Champion",
+          "8.5GB VRAM",
+          "UI Grounding"
+        ]
+      },
+      "moondream2": {
+        "name": "Moondream2 (1.86B Ultra-Fast VLM)",
+        "vram_gb": 3.5,
+        "repo": "vikhyatk/moondream2",
+        "release_date": "August 2024",
+        "category": "Edge Visual QA & OCR",
+        "architecture": "SigLIP + Phi-1.5 Multimodal Backbone",
+        "params": "1.86B Parameters",
+        "notes": "The king of lightweight vision. Designed specifically for low-VRAM GPUs. Can answer visual questions, detect objects, and describe images in under 150ms. Takes only ~3.5GB VRAM, making it run effortlessly alongside 7B/14B text models on a Single T4.",
+        "strengths": [
+          "Sub-200ms latency",
+          "Tiny 3.5GB footprint",
+          "Great OCR on text-dense screenshots"
+        ],
+        "recommended_for": "Quick visual inspection, image QA, and real-time captioning",
+        "tags": [
+          "Fast VLM",
+          "3.5GB VRAM",
+          "Low Latency"
+        ]
+      },
+      "qwen2-vl-2b": {
+        "name": "Qwen2-VL 2B Instruct (Dynamic Resolution)",
+        "vram_gb": 4.5,
+        "repo": "Qwen/Qwen2-VL-2B-Instruct",
+        "release_date": "September 2024",
+        "category": "Multimodal Visual Agent",
+        "architecture": "Qwen2 Transformer + Dynamic NaViT ViT",
+        "params": "2.2B Parameters",
+        "notes": "Alibaba's landmark multimodal model featuring Native Dynamic Resolution (NaViT). Unlike older models that force-scale images to fixed grids, Qwen2-VL dynamically adapts token counts to image aspect ratio. Strong visual reasoning, document comprehension, and UI coordinate grounding.",
+        "strengths": [
+          "Native dynamic resolution",
+          "UI coordinate & bounding box grounding",
+          "Multi-image reasoning"
+        ],
+        "recommended_for": "GUI automation, document parsing, and agent visual perception",
+        "tags": [
+          "Dynamic NaViT",
+          "UI Grounding",
+          "Visual Agent"
+        ]
+      },
+      "qwen2.5-vl-3b": {
+        "name": "Qwen2.5-VL 3B Instruct (SOTA Compact VLM)",
+        "vram_gb": 5.8,
+        "repo": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "release_date": "January 2025",
+        "category": "Frontier Compact Multimodal",
+        "architecture": "Qwen2.5 Transformer + Windowed NaViT ViT",
+        "params": "3.0B Parameters",
+        "notes": "The state of the art in compact vision-language models. Significantly upgrades document understanding, tabular data extraction, code from screenshots, and spatial bounding boxes. Exceptional precision on scanned PDFs, receipts, and complex web screenshots.",
+        "strengths": [
+          "SOTA OCR & tables",
+          "Spatial reasoning & bounding boxes",
+          "Video timestamp understanding"
+        ],
+        "recommended_for": "High-precision document extraction, code transcription from UI, and chart analysis",
+        "tags": [
+          "SOTA 2025",
+          "Document OCR",
+          "Bounding Boxes"
+        ]
+      },
+      "minicpm-v-2_6": {
+        "name": "MiniCPM-V 2.6 (8B High-Res Multi-Image SOTA)",
+        "vram_gb": 8.5,
+        "repo": "openbmb/MiniCPM-V-2_6",
+        "release_date": "August 2024",
+        "category": "High-Density Visual Reasoning",
+        "architecture": "Qwen2 7B + SigLIP-400M Dense Multimodal",
+        "params": "8.0B Parameters",
+        "notes": "Surpasses GPT-4V and Claude 3.5 Sonnet on several single-image and multi-image benchmarks. Accepts high-resolution images up to 1.8 million pixels at arbitrary aspect ratios. Runs on a single T4 with ~8.5GB VRAM. Benchmark leader for deep visual perception.",
+        "strengths": [
+          "GPT-4V parity on OCRBench",
+          "Up to 1.8M pixel resolution",
+          "Multi-image & video clip reasoning"
+        ],
+        "recommended_for": "Complex architectural diagrams, high-density blueprints, and dense mathematical OCR",
+        "tags": [
+          "GPT-4V Parity",
+          "High-Res 1.8M px",
+          "Multi-Image"
+        ]
+      },
+      "internvl2.5-4b": {
+        "name": "InternVL 2.5 4B (SOTA UI Grounding & OCR)",
+        "vram_gb": 4.5,
+        "repo": "OpenGVLab/InternVL2_5-4B",
+        "release_date": "December 2024",
+        "category": "SOTA Compact Vision & UI Perception",
+        "architecture": "Qwen2.5 3B + InternViT-300M",
+        "params": "4.2B Parameters",
+        "notes": "Benchmark champion for OCR and UI coordinate grounding. Superior precision for reading text boxes in visual novels, locating on-screen buttons, and extracting tables from complex screenshots. Lightweight 4.5 GB footprint allows it to easily co-exist with text and image models.",
+        "strengths": [
+          "#1 on OCRBench v2 for sub-5B models",
+          "UI coordinate localization",
+          "Low 4.5GB VRAM usage"
+        ],
+        "recommended_for": "Screen inspection, visual novel text box verification, and UI automation",
+        "tags": [
+          "OCR Leader",
+          "UI Grounding",
+          "4.5GB VRAM"
+        ]
+      },
+      "pixtral-12b": {
+        "name": "Pixtral 12B (Mistral 128k Multi-Image VLM)",
+        "vram_gb": 7.8,
+        "repo": "mistralai/Pixtral-12B-2409",
+        "release_date": "September 2024",
+        "category": "Long-Context Multimodal Inspection",
+        "architecture": "Mistral Nemo 12B + 400M 2D Vision Encoder",
+        "params": "12.4B Parameters",
+        "notes": "Mistral AI's multimodal flagship with native 128k context and arbitrary resolution image encoding. Can evaluate multiple sequential visual novel CGs or character sprites in a single prompt to ensure art style consistency and wardrobe continuity across game chapters.",
+        "strengths": [
+          "128k multimodal context",
+          "Multi-image sequence reasoning",
+          "Native arbitrary aspect ratio"
+        ],
+        "recommended_for": "Multi-scene character consistency checking, art book analysis, and complex game asset audits",
+        "tags": [
+          "128k Multimodal",
+          "Multi-Image",
+          "Visual Novel Audit"
+        ]
+      },
+      "qwen2.5-vl-72b": {
+        "name": "Qwen2.5-VL 72B Instruct (42GB VRAM \u2022 Frontier Visual Agent SOTA)",
+        "vram_gb": 42.0,
+        "repo": "Qwen/Qwen2.5-VL-72B-Instruct",
+        "release_date": "January 2025",
+        "category": "Colossal Frontier Visual Agent & Perception",
+        "architecture": "Qwen2.5 72B Transformer + Windowed NaViT ViT",
+        "params": "72.0B Parameters",
+        "notes": "The highest-ranking open multimodal vision-language model in existence. Parity with GPT-4o and Claude 3.5 Sonnet on DocVQA, MathVista, and ChartQA. Capable of parsing hour-long video feeds, inspecting entire architectural CAD blueprints, and autonomous GUI coordinate clicking. Requires Modal A100-80GB or H100 (~42GB VRAM in FP8/AWQ).",
+        "strengths": [
+          "World #1 open multimodal benchmark score",
+          "Hour-long video & complex blueprint reasoning",
+          "Autonomous GUI grounded interaction"
+        ],
+        "recommended_for": "Modal A100-80GB deep multimodal analysis, full game screen audits, and enterprise document vision",
+        "tags": [
+          "Modal A100/H100",
+          "72B Vision SOTA",
+          "GUI & Video Leader"
+        ]
+      }
+    },
+    "voice": {
+      "kokoro-82m": {
+        "name": "Kokoro-82M (20x Real-Time CPU Voice)",
+        "ram_gb": 0.45,
+        "repo": "hexgrad/Kokoro-82M",
+        "release_date": "December 2024",
+        "category": "Real-Time Neural Speech",
+        "architecture": "StyleTTS 2 Decoupled + iSTFTNet Decoding",
+        "params": "82M Parameters",
+        "notes": "An engineering triumph. Achieves top-tier MOS naturalness while occupying under 450MB of host memory and running 20x faster than real-time on a standard CPU. Zero GPU VRAM needed! Adheres cleanly to the OpenAI /v1/audio/speech API format.",
+        "strengths": [
+          "Runs on any 2-vCPU / 4-vCPU",
+          "0.45GB RAM footprint",
+          "Natural prosody without GPU cost"
+        ],
+        "recommended_for": "Real-time voice chat, conversational agents, and audiobooks",
+        "tags": [
+          "20x RT CPU",
+          "0.45GB RAM",
+          "OpenAI /v1 Audio"
+        ]
+      },
+      "f5-tts": {
+        "name": "F5-TTS (DiT Flow Matching Voice Clone)",
+        "ram_gb": 1.2,
+        "repo": "SWivid/F5-TTS",
+        "release_date": "October 2024",
+        "category": "Zero-Shot Voice Cloning",
+        "architecture": "Diffusion Transformer (DiT) + Optimal Transport CFM",
+        "params": "385M Parameters",
+        "notes": "The modern successor to legacy autoregressive TTS. Uses non-autoregressive Optimal Transport Conditional Flow Matching (OT-CFM) over a Diffusion Transformer. Capable of flawless zero-shot voice cloning from just a 3-5 second audio reference with an RTF of 0.15.",
+        "strengths": [
+          "Zero-shot voice cloning from 3s sample",
+          "No complex phoneme alignment",
+          "Clean natural pacing"
+        ],
+        "recommended_for": "Custom character voices, instant voice cloning, and expressive podcasting",
+        "tags": [
+          "Flow Matching",
+          "Voice Clone",
+          "DiT Diffusion"
+        ]
+      },
+      "cosyvoice2-0.5b": {
+        "name": "CosyVoice 2 (150ms Streaming TTFA Voice)",
+        "ram_gb": 1.5,
+        "repo": "FunAudioLLM/CosyVoice2-0.5B",
+        "release_date": "December 2024",
+        "category": "Ultra-Low-Latency Conversational TTS",
+        "architecture": "Finite-Scalar Quantization (FSQ) + Causal Flow Matching",
+        "params": "500M Parameters",
+        "notes": "Alibaba's low-latency streaming powerhouse. Combines an FSQ language model with chunk-aware causal flow matching to reduce Time-To-First-Audio (TTFA) to ~150ms. Perfect for fluid bidirectional voice conversations with near-human response speed.",
+        "strengths": [
+          "150ms time-to-first-audio",
+          "Chunked streaming playback",
+          "Emotional tone control"
+        ],
+        "recommended_for": "Live interactive voice assistants and phone call agents",
+        "tags": [
+          "150ms TTFA",
+          "Streaming Audio",
+          "Conversational"
+        ]
+      },
+      "xtts-v2": {
+        "name": "Coqui XTTS v2 (17 Languages Voice Clone)",
+        "ram_gb": 1.8,
+        "repo": "coqui/XTTS-v2",
+        "release_date": "November 2023",
+        "category": "Multilingual Voice Cloning",
+        "architecture": "Tortoise-derived Autoregressive + HifiGAN",
+        "params": "1.8B Parameters",
+        "notes": "The multi-language standard. Clones voices across 17 distinct languages (English, Spanish, French, German, Japanese, Chinese, etc.) using a short reference WAV while preserving accent and emotional cadence.",
+        "strengths": [
+          "17 languages cross-lingual cloning",
+          "Battle-tested stability",
+          "Rich speaker diversity"
+        ],
+        "recommended_for": "International voice translation and multilingual NPCs",
+        "tags": [
+          "17 Languages",
+          "Cross-Lingual",
+          "Zero-Shot"
+        ]
+      },
+      "bark-small": {
+        "name": "Suno Bark Small (Expressive Generative Speech)",
+        "ram_gb": 0.9,
+        "repo": "suno/bark-small",
+        "release_date": "April 2023",
+        "category": "Generative Audio & Sound Synthesis",
+        "architecture": "EnCodec + Multi-stage GPT Acoustic Modeling",
+        "params": "100M Parameters",
+        "notes": "A unique generative audio model from Suno. Unlike conventional TTS engines that only speak text, Bark can generate non-verbal audio cues: laughter, sighs, hesitation [hesitates], music, and environmental sounds directly in-line with speech.",
+        "strengths": [
+          "Non-verbal speech nuances [laughs, sighs]",
+          "Music & sound effect generation",
+          "Zero-shot cloning"
+        ],
+        "recommended_for": "Dramatic narration, expressive audio drama, and lifelike emotional gaming NPCs",
+        "tags": [
+          "Expressive [laughs]",
+          "Non-Verbal Audio",
+          "Generative"
+        ]
+      }
+    },
+    "draft": {
+      "qwen2.5-coder-1.5b": {
+        "name": "Qwen 2.5 Coder 1.5B (Speculative Draft)",
+        "weights_gb": 1.2,
+        "quant": "Q4_K_M",
+        "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+        "file": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+        "fallback_repo": "bartowski/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+        "fallback_file": "Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf",
+        "hf_model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+        "family": "qwen"
+      },
+      "qwen2.5-coder-3b": {
+        "name": "Qwen 2.5 Coder 3B (High-Acceptance Draft)",
+        "weights_gb": 2.2,
+        "quant": "Q4_K_M",
+        "repo": "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+        "file": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+        "fallback_repo": "bartowski/Qwen2.5-Coder-3B-Instruct-GGUF",
+        "fallback_file": "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf",
+        "hf_model": "Qwen/Qwen2.5-Coder-3B-Instruct",
+        "family": "qwen"
+      },
+      "llama-3.2-1b": {
+        "name": "Llama 3.2 1B (Llama Speculative Draft)",
+        "weights_gb": 0.8,
+        "quant": "Q4_K_M",
+        "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "file": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "fallback_repo": "hugging-quants/Llama-3.2-1B-Instruct-Q4_K_M-GGUF",
+        "fallback_file": "llama-3.2-1b-instruct-q4_k_m.gguf",
+        "hf_model": "meta-llama/Llama-3.2-1B-Instruct",
+        "family": "llama"
+      },
+      "llama-3.2-3b": {
+        "name": "Llama 3.2 3B (Llama High-Acceptance Draft)",
+        "weights_gb": 2.1,
+        "quant": "Q4_K_M",
+        "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+        "file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "fallback_repo": "mradermacher/Llama-3.2-3B-Instruct-abliterated-GGUF",
+        "fallback_file": "Llama-3.2-3B-Instruct-abliterated.Q4_K_M.gguf",
+        "hf_model": "meta-llama/Llama-3.2-3B-Instruct",
+        "family": "llama"
+      }
+    },
+    "image": {
+      "sd-turbo": {
+        "name": "SD-Turbo (3.8GB VRAM \u2022 1-step Fast Art)",
+        "vram_gb": 3.8,
+        "default_steps": 1,
+        "default_guidance": 0.0,
+        "repo": "stabilityai/sd-turbo",
+        "release_date": "November 2023",
+        "category": "1-Step Adversarial Diffusion",
+        "architecture": "Adversarial Diffusion Distillation (ADD)",
+        "params": "860M Parameters",
+        "notes": "Generates 512x512 images in a single inference step (~60ms). Low VRAM footprint makes it easy to run alongside 7B or 14B LLMs on a Single T4 GPU without memory eviction.",
+        "strengths": [
+          "Single-step 60ms inference",
+          "Low 3.8GB VRAM footprint",
+          "Reliable prompt adherence"
+        ],
+        "recommended_for": "Real-time thumbnail generation, sprite drafting, and instant UI art",
+        "tags": [
+          "60ms Fast",
+          "3.8GB VRAM",
+          "512x512"
+        ]
+      },
+      "sdxl-turbo": {
+        "name": "SDXL-Turbo (6.5GB VRAM \u2022 SOTA 1024x1024 Art)",
+        "vram_gb": 6.5,
+        "default_steps": 1,
+        "default_guidance": 0.0,
+        "repo": "stabilityai/sdxl-turbo",
+        "release_date": "December 2023",
+        "category": "Frontier High-Res Diffusion",
+        "architecture": "SDXL 3.5B + Adversarial Distillation",
+        "params": "3.5B Parameters",
+        "notes": "Produces high-fidelity 1024x1024 images in 1-2 steps. Exceptional detail, artistic textures, and lighting. On a Single T4 (14.5GB), pairing with a 14B model is tight\u2014Text Focus Mode will automatically evict it when context expands.",
+        "strengths": [
+          "1024x1024 native resolution",
+          "Photorealistic texture rendering",
+          "1-step high quality"
+        ],
+        "recommended_for": "Production illustration, game concept art, and high-resolution backgrounds",
+        "tags": [
+          "1024x1024 SOTA",
+          "6.5GB VRAM",
+          "1-Step ADD"
+        ]
+      },
+      "sdxl-lightning": {
+        "name": "SDXL-Lightning (6.5GB VRAM \u2022 2-4 Step Fast SOTA)",
+        "vram_gb": 6.5,
+        "default_steps": 4,
+        "default_guidance": 0.0,
+        "repo": "ByteDance/SDXL-Lightning",
+        "release_date": "February 2024",
+        "category": "Progressive Adversarial Distillation",
+        "architecture": "SDXL 3.5B + Lightning Distillation",
+        "params": "3.5B Parameters",
+        "notes": "ByteDance's distilled lightning model. Generates 1024x1024 photorealistic art in only 2-4 steps (~1.2s on T4). Combines SOTA SDXL visual coherence with near-real-time generation.",
+        "strengths": [
+          "1024x1024 in 2-4 steps",
+          "High-coherence photorealism",
+          "Fast inference"
+        ],
+        "recommended_for": "Rapid prototyping, game asset rendering, and high-res concept art",
+        "tags": [
+          "2-4 Steps",
+          "6.5GB VRAM",
+          "1024x1024 SOTA"
+        ]
+      },
+      "animagine-xl-3.1": {
+        "name": "Animagine XL 3.1 (6.6GB VRAM \u2022 SOTA Anime/Art Uncensored)",
+        "vram_gb": 6.6,
+        "default_steps": 25,
+        "default_guidance": 7.0,
+        "repo": "cagliostrolab/animagine-xl-3.1",
+        "release_date": "March 2024",
+        "category": "Uncensored Illustrative & Anime SOTA",
+        "architecture": "SDXL 3.5B Fine-Tuned (Danbooru tagging)",
+        "params": "3.5B Parameters",
+        "notes": "The undisputed community champion for uncensored anime, character design, and painterly concept art. Zero corporate refusal filters, unparalleled mastery of anime aesthetics, clothing tags, and cinematic composition. Runs in 6.6GB VRAM on Colab or Kaggle.",
+        "strengths": [
+          "Zero censorship/refusals",
+          "SOTA character & costume rendering",
+          "Deep prompt tag vocabulary"
+        ],
+        "recommended_for": "Game character art, concept design, illustrations, and unconstrained creative workflows",
+        "tags": [
+          "Uncensored",
+          "Anime & Concept SOTA",
+          "Danbooru Tags"
+        ]
+      },
+      "mobius": {
+        "name": "Mobius DPO (6.6GB VRAM \u2022 SOTA Photorealism Uncensored)",
+        "vram_gb": 6.6,
+        "default_steps": 25,
+        "default_guidance": 7.0,
+        "repo": "stablediffusionapi/mobius",
+        "release_date": "May 2024",
+        "category": "Direct Preference Optimized Diffusion",
+        "architecture": "SDXL 3.5B + DPO Alignment",
+        "params": "3.5B Parameters",
+        "notes": "Trained using Direct Preference Optimization (DPO) to push image aesthetic scores to maximum. Produces dramatic hyper-detailed textures, lighting, and cinematic surrealism without corporate guardrails.",
+        "strengths": [
+          "High aesthetic DPO score",
+          "Uncensored surrealism & fantasy",
+          "Intricate texture details"
+        ],
+        "recommended_for": "Cinematic wallpapers, hyper-detailed fantasy art, and book covers",
+        "tags": [
+          "DPO Tuned",
+          "High Aesthetic",
+          "Uncensored"
+        ]
+      },
+      "realvisxl-v4": {
+        "name": "RealVisXL V4.0 (6.6GB VRAM \u2022 SOTA Cinema/Anatomy Uncensored)",
+        "vram_gb": 6.6,
+        "default_steps": 25,
+        "default_guidance": 5.0,
+        "repo": "SG161222/RealVisXL_V4.0",
+        "release_date": "June 2024",
+        "category": "SOTA Human Anatomy & Studio Cinema",
+        "architecture": "SDXL 3.5B Photorealism Fine-Tune",
+        "params": "3.5B Parameters",
+        "notes": "The benchmark for raw photorealism. Excels at human skin textures, eyes, natural lighting, and studio cinematography without the waxy or artificial look common in corporate models. Fully uncensored.",
+        "strengths": [
+          "Lifelike skin pores and natural eyes",
+          "Studio cinematic lighting",
+          "Zero waxy plastic look"
+        ],
+        "recommended_for": "Photorealistic portraits, real-world scenes, and cinematic lighting studies",
+        "tags": [
+          "Photorealism SOTA",
+          "Natural Skin",
+          "Uncensored"
+        ]
+      },
+      "realvisxl-v5": {
+        "name": "RealVisXL V5.0 (6.6GB VRAM \u2022 SOTA Photorealism & Cinema)",
+        "vram_gb": 6.6,
+        "default_steps": 30,
+        "default_guidance": 5.0,
+        "repo": "SG161222/RealVisXL_V5.0",
+        "release_date": "August 2024",
+        "category": "SOTA Photorealism & Human Anatomy",
+        "architecture": "SDXL 3.5B Photorealism Fine-Tune",
+        "params": "3.5B Parameters",
+        "notes": "The absolute benchmark for lifelike human skin textures, realistic lighting, and studio cinematography without waxy plastic artifacts. Fully uncensored.",
+        "strengths": [
+          "Next-gen photorealism",
+          "Natural eyes and skin pores",
+          "Zero waxy artifacts"
+        ],
+        "recommended_for": "Photorealistic portraits, real-world scenes, and cinematic lighting",
+        "tags": [
+          "Photorealism SOTA",
+          "Natural Skin",
+          "Uncensored"
+        ]
+      },
+      "flux-1-schnell": {
+        "name": "FLUX.1-schnell (23.8GB VRAM \u2022 12B Giant DiT Kaggle 30GB)",
+        "vram_gb": 23.8,
+        "default_steps": 4,
+        "default_guidance": 0.0,
+        "repo": "black-forest-labs/FLUX.1-schnell",
+        "release_date": "August 2024",
+        "category": "12B Flow Matching Transformer (DiT)",
+        "architecture": "12B Rectified Flow Transformer + T5-XXL Text Encoder",
+        "params": "12.0B Parameters",
+        "notes": "Black Forest Labs' 12B parameter flagship flow-matching transformer. Generates astonishing typographical rendering, complex multi-object composition, and photorealism in just 4 steps. Demands ~23.8GB VRAM: uses the full 30GB VRAM of Kaggle Dual-T4!",
+        "strengths": [
+          "Flawless text spelling inside images",
+          "12B massive world knowledge",
+          "4-step fast flow matching"
+        ],
+        "recommended_for": "Kaggle Dual-T4 maximum image generation, posters with typography, and complex scenes",
+        "tags": [
+          "12B Giant DiT",
+          "Kaggle 30GB VRAM",
+          "Text in Images"
+        ]
+      },
+      "flux-dev-uncensored": {
+        "name": "FLUX.1-dev Abliterated V2 GGUF (10.5GB VRAM \u2022 12B Uncensored Q4_K_M)",
+        "vram_gb": 10.5,
+        "default_steps": 24,
+        "default_guidance": 3.5,
+        "repo": "t8star/flux.1-dev-abliterated-V2-GGUF",
+        "gguf_file": "T8-flux.1-dev-abliterated-V2-GGUF-Q4_K_M.gguf",
+        "quant_files": {
+          "Q4_K_M": "T8-flux.1-dev-abliterated-V2-GGUF-Q4_K_M.gguf",
+          "Q6_K": "T8-flux.1-dev-abliterated-V2-GGUF-Q6_K.gguf",
+          "Q8_0": "T8-flux.1-dev-abliterated-V2-GGUF-Q8_0.gguf"
+        },
+        "base_repo": "black-forest-labs/FLUX.1-dev",
+        "pipeline_type": "flux_gguf",
+        "requires_offload": true,
+        "requires_gpu": true,
+        "release_date": "October 2025",
+        "category": "12B Uncensored Flow Matching DiT (GGUF)",
+        "architecture": "12B FLUX.1-dev Abliterated GGUF + 4-bit T5-XXL + FP32 VAE + CPU Offload",
+        "params": "12.0B Parameters (Q4_K_M GGUF)",
+        "notes": "Verified working uncensored 12B FLUX.1-dev Abliterated GGUF recipe. Combines Q4_K_M GGUF transformer with 4-bit BnB T5-XXL, FP32 VAE, and model CPU offload to run cleanly on 15GB Tesla T4 with zero PEFT key errors.",
+        "strengths": [
+          "Zero refusal alignment",
+          "Fits 15GB T4 with CPU offload",
+          "Clean GGUF weights (no broken PEFT keys)"
+        ],
+        "recommended_for": "Unrestricted 12B FLUX generation on Colab T4, L4, or Kaggle Dual-T4",
+        "tags": [
+          "12B Abliterated GGUF",
+          "T4 Compatible",
+          "Zero Refusals"
+        ]
+      },
+      "flux-uncensored-v2": {
+        "name": "Chroma1-HD GGUF (10.2GB VRAM \u2022 8.9B Uncensored Apache-2.0)",
+        "vram_gb": 10.2,
+        "default_steps": 25,
+        "default_guidance": 4.0,
+        "repo": "silveroxides/Chroma1-HD-gguf",
+        "gguf_file": "Chroma1-HD-Q4_K_S.gguf",
+        "base_repo": "lodestones/Chroma1-HD",
+        "pipeline_type": "chroma_gguf",
+        "requires_offload": true,
+        "requires_gpu": true,
+        "release_date": "September 2025",
+        "category": "8.9B Uncensored Flow Matching DiT (GGUF)",
+        "architecture": "8.9B Chroma1-HD GGUF + 4-bit T5-XXL + FP32 VAE + CPU Offload",
+        "params": "8.9B Parameters (Q4_K_S GGUF)",
+        "notes": "Apache-2.0 uncensored FLUX-derived 8.9B model quantized to GGUF. High anatomical fidelity and zero censorship, running cleanly on 15GB T4 with 4-bit T5-XXL and CPU offload.",
+        "strengths": [
+          "100% Apache-2.0 uncensored",
+          "Fits 15GB T4 via GGUF + CPU offload",
+          "Superior anime & photoreal anatomy"
+        ],
+        "recommended_for": "Unrestricted creative & character generation on Colab T4 or Kaggle",
+        "tags": [
+          "Chroma1-HD GGUF",
+          "T4 Compatible",
+          "Apache-2.0 Uncensored"
+        ]
+      },
+      "illustrious-xl": {
+        "name": "Illustrious-XL v2.0 (6.8GB VRAM \u2022 SOTA Anime 1536x1536)",
+        "vram_gb": 6.8,
+        "default_steps": 28,
+        "default_guidance": 7.0,
+        "repo": "OnomaAIResearch/Illustrious-XL-v2.0",
+        "release_date": "October 2024",
+        "category": "SOTA Anime & Visual Novel Foundation",
+        "architecture": "SDXL 3.5B + Danbooru2023 1536x1536 Native",
+        "params": "3.5B Parameters",
+        "notes": "The new gold standard anime and game asset diffusion model. Succeeds Animagine XL with native 1536x1536 resolution, superior anatomical hands/faces, and dual prompt support (Danbooru tags + natural language prose). Runs in 6.8GB VRAM on Colab or Kaggle.",
+        "strengths": [
+          "Native 1536x1536 rendering",
+          "Danbooru + natural prose prompts",
+          "SOTA hands, eyes, and costumes"
+        ],
+        "recommended_for": "Visual novel character sprites, event CGs, anime illustrations, and game wallpapers",
+        "tags": [
+          "SOTA Anime 2025",
+          "1536x1536 Native",
+          "Visual Novel CG"
+        ]
+      },
+      "illustrious-xl-v2": {
+        "name": "Illustrious-XL v2.0 Diffusers (6.8GB VRAM \u2022 Native 1536x1536)",
+        "vram_gb": 6.8,
+        "default_steps": 28,
+        "default_guidance": 7.0,
+        "repo": "Jommarn/Illustrious-XL-v2.0",
+        "fallback_repo": "OnomaAIResearch/Illustrious-XL-v2.0",
+        "release_date": "October 2024",
+        "category": "SOTA Anime & Visual Novel Foundation",
+        "architecture": "SDXL 3.5B + Danbooru2023 1536x1536 Native",
+        "params": "3.5B Parameters",
+        "notes": "Gold standard anime model with diffusers-native weights. Native 1536x1536 rendering with dual tag + natural prose prompting.",
+        "strengths": [
+          "Native 1536x1536 resolution",
+          "Diffusers-native weights",
+          "SOTA anime character fidelity"
+        ],
+        "recommended_for": "Visual novel character sprites, event CGs, anime illustrations",
+        "tags": [
+          "Diffusers Native",
+          "1536x1536",
+          "Anime SOTA"
+        ]
+      },
+      "noobai-xl": {
+        "name": "NoobAI-XL V-Pred (7.0GB VRAM \u2022 Modern Anime Aesthetic)",
+        "vram_gb": 7.0,
+        "default_steps": 30,
+        "default_guidance": 4.0,
+        "repo": "Laxhar/noobai-XL-Vpred-1.0",
+        "release_date": "November 2024",
+        "category": "High-Vibrancy Modern Anime Art",
+        "architecture": "SDXL V-Prediction Distillation",
+        "params": "3.5B Parameters",
+        "notes": "Features V-Prediction formulation delivering dramatic anime studio lighting, deep saturation, and dynamic action poses. Note: Requires low CFG (1.5-3.5) with Euler sampler to avoid oversaturation.",
+        "strengths": [
+          "Vibrant anime studio lighting",
+          "Dynamic perspective and action poses",
+          "Deep color depth"
+        ],
+        "recommended_for": "Dynamic action visual novel scenes, battle sprites, and cover illustrations",
+        "tags": [
+          "V-Prediction",
+          "Studio Lighting",
+          "Anime Action"
+        ]
+      },
+      "noobai-xl-vpred": {
+        "name": "NoobAI-XL V-Pred 1.0 (7.0GB VRAM \u2022 V-Pred Zero-SNR SOTA Anime)",
+        "vram_gb": 7.0,
+        "default_steps": 30,
+        "default_guidance": 4.0,
+        "repo": "Laxhar/noobai-XL-Vpred-1.0",
+        "release_date": "November 2024",
+        "category": "High-Vibrancy Modern Anime Art (Zero-SNR)",
+        "architecture": "SDXL V-Prediction Distillation",
+        "params": "3.5B Parameters",
+        "notes": "Features V-Prediction zero-SNR scheduler delivering dramatic studio lighting, deep saturation, and dynamic action poses with Euler sampler.",
+        "strengths": [
+          "Vibrant anime studio lighting",
+          "Dynamic perspective and action poses",
+          "Deep color depth"
+        ],
+        "recommended_for": "Dynamic action visual novel scenes, battle sprites, and cover illustrations",
+        "tags": [
+          "V-Prediction",
+          "Zero-SNR",
+          "Anime SOTA"
+        ]
+      },
+      "pony-v6-xl": {
+        "name": "Pony Diffusion V6 XL (6.8GB VRAM \u2022 Uncensored Character Master)",
+        "vram_gb": 6.8,
+        "default_steps": 28,
+        "default_guidance": 7.0,
+        "repo": "stablediffusionapi/Pony-Diffusion-V6-XL",
+        "fallback_repo": "Bakanayatsu/Pony-Diffusion-V6-XL-for-Anime",
+        "release_date": "January 2024",
+        "category": "Uncensored Character & Mature Scene SOTA",
+        "architecture": "SDXL 3.5B + Aesthetic Score Alignment",
+        "params": "3.5B Parameters",
+        "notes": "The community standard for uncensored character art, intricate poses, and mature visual novel romance scenes. Automatically configured with clip_skip=2 for optimal facial fidelity. Compatible with thousands of community LoRAs.",
+        "strengths": [
+          "100% unconstrained mature scenes",
+          "Vast LoRA ecosystem compatibility",
+          "Automatic clip_skip=2 tuning"
+        ],
+        "recommended_for": "Mature visual novel scenes, intimate character interactions, and customized LoRA workflows",
+        "tags": [
+          "Mature VN Uncensored",
+          "LoRA Ready",
+          "Pony V6"
+        ]
+      },
+      "sd-3.5-medium": {
+        "name": "SD 3.5 Medium (5.5GB VRAM \u2022 2.5B MMDiT Fast Art)",
+        "vram_gb": 5.5,
+        "default_steps": 28,
+        "default_guidance": 4.5,
+        "repo": "stabilityai/stable-diffusion-3.5-medium",
+        "release_date": "October 2024",
+        "category": "2.5B Multimodal Diffusion Transformer",
+        "architecture": "MMDiT 2.5B Rectified Flow",
+        "params": "2.5B Parameters",
+        "notes": "Stability AI's 2.5B MMDiT architecture. Delivers exceptional typography (spelling words directly on signs, banners, and game logos) and complex multi-subject composition. Runs with low ~5.5GB VRAM footprint on a Single T4 GPU.",
+        "strengths": [
+          "In-image typography and text spelling",
+          "Low 5.5GB VRAM footprint",
+          "Complex spatial composition"
+        ],
+        "recommended_for": "Game logos, item icons with text, environmental signs, and UI assets",
+        "tags": [
+          "Text in Images",
+          "2.5B MMDiT",
+          "Single T4 Fast"
+        ]
+      },
+      "flux-1-dev": {
+        "name": "FLUX.1 [dev] (32GB VRAM \u2022 12B Guidance DiT Modal A100)",
+        "vram_gb": 32.0,
+        "default_steps": 25,
+        "default_guidance": 3.5,
+        "repo": "black-forest-labs/FLUX.1-dev",
+        "release_date": "August 2024",
+        "category": "12B Rectified Flow Transformer (Guidance Distilled)",
+        "architecture": "12B Rectified Flow + T5-XXL + CLIP-L",
+        "params": "12.0B Parameters",
+        "notes": "Black Forest Labs' flagship 12B model with non-commercial guidance distillation. Significantly superior prompt adherence, human anatomy, hands, and typography over Schnell. Requires ~32GB VRAM (full unquantized BF16 weights); runs smoothly on Modal A100-40GB / A100-80GB.",
+        "strengths": [
+          "Full guidance scale control (CFG 2.0-4.0)",
+          "Unmatched anatomical accuracy and lighting",
+          "SOTA in-image typography"
+        ],
+        "recommended_for": "Modal A100-80GB / H100 studio-grade key art, book covers, and high-fidelity concept design",
+        "tags": [
+          "Modal A100",
+          "12B SOTA DiT",
+          "Photorealism Leader"
+        ]
+      },
+      "trellis-3d": {
+        "name": "Microsoft TRELLIS (24GB VRAM \u2022 SOTA Image-to-3D GLB/Gaussian)",
+        "vram_gb": 24.0,
+        "repo": "microsoft/TRELLIS-image-large",
+        "release_date": "December 2024",
+        "category": "Structured Radiance & 3D Gaussian Splat Synthesis",
+        "architecture": "Rectified Flow DiT + 3D Structured Latents (SLAT) + Gaussian Decoder",
+        "params": "1.4B Parameters",
+        "notes": "Microsoft's breakthrough image-to-3D model. Produces high-resolution textured 3D meshes (GLB) and 3D Gaussian Splats from a single 2D image in under 15 seconds on an A10G or A100. Ideal for generating 3D game props, character models, and environmental assets directly from 2D concepts.",
+        "strengths": [
+          "Full textured GLB meshes & Gaussian Splats in <15s",
+          "High geometric fidelity and PBR textures",
+          "Runs on budget Modal A10G ($1.10/hr)"
+        ],
+        "recommended_for": "Modal A10G / A100 instant 3D asset generation, game development, and VR props",
+        "tags": [
+          "Modal A10G/A100",
+          "Image-to-3D SOTA",
+          "GLB & Splats"
+        ]
+      },
+      "hunyuan3d-2": {
+        "name": "Tencent Hunyuan3D-2.0 (32GB VRAM \u2022 High-Res 3D Mesh Studio)",
+        "vram_gb": 32.0,
+        "repo": "tencent/Hunyuan3D-2",
+        "release_date": "January 2025",
+        "category": "High-Resolution 3D Generative Mesh Foundation",
+        "architecture": "Dual-Flow DiT + High-Res Texture Synthesizer",
+        "params": "3.2B Parameters",
+        "notes": "Tencent's next-generation 3D generative model. Emits production-ready watertight 3D meshes with 2048x2048 UV texture maps. Handles intricate hair, cloth folds, and inorganic mechanical details. Requires 32GB VRAM on Modal A100-40GB / A100-80GB.",
+        "strengths": [
+          "Watertight production meshes with 2k UV textures",
+          "Intricate geometric topology",
+          "Superior character and mechanical synthesis"
+        ],
+        "recommended_for": "Modal A100-80GB game-ready 3D character and environment production",
+        "tags": [
+          "Modal A100",
+          "3D Mesh SOTA",
+          "2k UV Textures"
+        ]
+      },
+      "wan2.1-14b-video": {
+        "name": "Wan2.1 14B (36GB VRAM \u2022 SOTA Flow DiT Video Generator)",
+        "vram_gb": 36.0,
+        "repo": "Wan-AI/Wan2.1-T2V-14B",
+        "release_date": "February 2025",
+        "category": "14B Flow Matching Diffusion Transformer Video",
+        "architecture": "14B 3D Spatio-Temporal DiT + Cross-Attention",
+        "params": "14.0B Parameters",
+        "notes": "Alibaba Wan-AI's groundbreaking 14B open-source text-to-video and image-to-video foundation model. Outperforms proprietary video generators on temporal consistency, dynamic physical motion, and cinematic lighting. Demands ~36GB VRAM: runs on Modal A100-80GB / H100.",
+        "strengths": [
+          "SOTA open video generation beating closed APIs",
+          "Complex physical interactions and fluid motion",
+          "720p/1080p cinematic camera movements"
+        ],
+        "recommended_for": "Modal A100-80GB / H100 cinematic video cutscenes, animated character portraits, and trailers",
+        "tags": [
+          "Modal A100/H100",
+          "14B Video SOTA",
+          "Cinematic Cutscenes"
+        ]
+      },
+      "hunyuan-video": {
+        "name": "Tencent HunyuanVideo (40GB VRAM \u2022 13B DiT Video SOTA)",
+        "vram_gb": 40.0,
+        "repo": "tencent/HunyuanVideo",
+        "release_date": "December 2024",
+        "category": "13B Spatio-Temporal DiT Video Engine",
+        "architecture": "13B Dual-Stream DiT + MLLM Text Conditioning",
+        "params": "13.0B Parameters",
+        "notes": "Tencent's high-definition open video transformer. Features dual-stream spatio-temporal attention for extraordinary photorealism and camera movement stability. Requires 40GB VRAM on Modal A100-80GB or H100.",
+        "strengths": [
+          "Dual-stream attention for rock-solid temporal coherence",
+          "Photorealistic rendering of human faces and hands in motion",
+          "Cinematic resolution"
+        ],
+        "recommended_for": "Modal A100-80GB high-fidelity character animations and cinematic video production",
+        "tags": [
+          "Modal A100/H100",
+          "13B Video DiT",
+          "Photoreal Video"
+        ]
+      }
+    }
+  }
+}

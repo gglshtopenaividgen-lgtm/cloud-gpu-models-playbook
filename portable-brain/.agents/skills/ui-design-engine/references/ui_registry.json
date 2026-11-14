@@ -1,0 +1,57 @@
+{
+  "version": "2.2.0",
+  "system": "ui-design-engine",
+  "description": "Dynamic UI Architecture & Resource Registry (Mini Auto-Skill for UI)",
+  "archetypes": {
+    "saas-dashboard": {
+      "name": "High-Density Operations & SaaS Dashboard",
+      "best_for": ["cloud consoles", "analytics", "data engines", "CRM", "tables", "monitoring"],
+      "layout": "collapsible sidebar (48px->220px) + sticky header (40px) + 12-column bento grid",
+      "density": "36-40px table row height, right-aligned tabular-nums, status dot chips",
+      "typography": { "display": "Outfit", "body": "Geist Sans", "mono": "JetBrains Mono" },
+      "primary_tokens": { "surface": "#020617", "card": "#0f172a", "border": "rgba(255,255,255,0.08)", "accent": "#10b981" }
+    },
+    "mobile-app": {
+      "name": "Mobile Ergonomics & PWA Studio",
+      "best_for": ["mobile", "PWA", "touch", "smartphone", "responsive", "audio player", "bottom dock"],
+      "layout": "bottom 35% thumb zone + floating dock + safe-area insets padding",
+      "touch_bounds": "min-h-[44px] min-w-[44px], zero overflow at <=375px",
+      "typography": { "display": "Plus Jakarta Sans", "body": "Geist Sans", "mono": "JetBrains Mono" },
+      "primary_tokens": { "surface": "#020617", "card": "#0f172a", "border": "rgba(255,255,255,0.1)", "accent": "#38bdf8" }
+    },
+    "game-canvas": {
+      "name": "Game Canvas & Audio-Reactive HUD",
+      "best_for": ["game", "canvas", "webgl", "rpg", "hud", "synth", "audio visualizer", "crt"],
+      "layout": "fixed full-bleed canvas (z-0) + pointer-events-none HUD overlay (z-10) with interactive glass nodes",
+      "styling": "CRT scanlines, Web Audio AnalyserNode CSS custom properties (--bass-energy)",
+      "typography": { "display": "Space Grotesk / Silkscreen", "body": "IBM Plex Mono", "mono": "JetBrains Mono" },
+      "primary_tokens": { "surface": "#050505", "card": "#0a0a0a", "border": "rgba(245, 158, 11, 0.3)", "accent": "#f59e0b" }
+    },
+    "document-editor": {
+      "name": "Distraction-Free Document & TipTap Editor",
+      "best_for": ["editor", "rich text", "tiptap", "notes", "markdown", "reading", "prose", "study"],
+      "layout": "max-w-[68ch] reading column + floating bubble menu + quiet hover gutters",
+      "typography": { "display": "Newsreader / Sentient", "body": "Switzer / Plus Jakarta Sans", "mono": "Fragment Mono" },
+      "primary_tokens": { "surface": "#09090b", "card": "#18181b", "border": "rgba(255,255,255,0.08)", "accent": "#f8fafc" }
+    },
+    "interactive-artifact": {
+      "name": "Self-Contained Standalone HTML/React Artifact",
+      "best_for": ["artifact", "widget", "calculator", "chart", "single file", "standalone prototype"],
+      "layout": "self-contained card frame + CSS container queries (@container) + local state machine",
+      "typography": { "display": "Outfit", "body": "Geist Sans", "mono": "JetBrains Mono" },
+      "primary_tokens": { "surface": "#020617", "card": "#0f172a", "border": "rgba(255,255,255,0.12)", "accent": "#38bdf8" }
+    },
+    "editorial-portfolio": {
+      "name": "Editorial Portfolio & Creative Showcase",
+      "best_for": ["portfolio", "agency", "landing page", "showcase", "creative", "branding"],
+      "layout": "asymmetric 12-column grid + fluid clamp typography + restrained motion curves",
+      "typography": { "display": "Cabinet Grotesk / Sentient", "body": "General Sans", "mono": "Geist Mono" },
+      "primary_tokens": { "surface": "#09090b", "card": "#121214", "border": "rgba(255,255,255,0.08)", "accent": "#e11d48" }
+    }
+  },
+  "guidelines": {
+    "anti_slop": "references/guidelines_anti_slop.md",
+    "design_systems": "references/guidelines_design_systems.md",
+    "archetypes": "references/guidelines_archetypes.md"
+  }
+}

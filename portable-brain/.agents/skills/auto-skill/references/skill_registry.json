@@ -1,0 +1,110 @@
+[
+  {
+    "name": "auto-skill",
+    "description": "Master Skill Lifecycle Engine: Discover, select, author, evaluate, benchmark, and optimize skills across universal and project-scoped registries.",
+    "path": ".agents/skills/auto-skill/SKILL.md",
+    "rel_path": ".agents/skills/auto-skill/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "browser-operator",
+    "description": "Generalized Full Browser Operation & Multi-Profile Stealth Automation Suite. Unifies Mode A (headless Playwright numeric DOM indexing), Mode B (authentic multi-profile Chrome CDP + \"Browser operator\" MV3 extension daemon for ANY website), and Mode C (specialized Argon/AI Studio bridges) with trusted hardware events (isTrusted:true), Shadow DOM/iframe traversal, virtualized scroll scanning, 3-tier file uploads, and 2FA/CAPTCHA circuit breaking.",
+    "path": ".agents/skills/browser-operator/SKILL.md",
+    "rel_path": ".agents/skills/browser-operator/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "deep-thinking",
+    "description": "Multi-perspective deep reasoning, hypothesis branching, architectural ideation, Spark/Gemini research prompt synthesis, and cloud storage blueprinting.",
+    "path": ".agents/skills/deep-thinking/SKILL.md",
+    "rel_path": ".agents/skills/deep-thinking/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "document-forge",
+    "description": "Universal document engineering powerhouse: convert, parse, edit, fill forms, calculate formulas, redline, and OCR across PDF, DOCX, PPTX, XLSX, and images. Automatically orchestrates Google Slides (gslides) for decks/PPTs and Google Docs (gdocs) for documents/PDFs.",
+    "path": ".agents/skills/document-forge/SKILL.md",
+    "rel_path": ".agents/skills/document-forge/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "exhaustive-audit-and-repair",
+    "description": "Universal Multi-Agent Code Audit & Architectural Repair System (UMACAR). Orchestrates specialized subagent squads, Requirement Traceability Matrix (RTM), git diff hunk chunking, anti-regression scanning against mistakes.md, live type/compiler verification, mobile ergonomics (under 375px), bounded arbitration, and memory synchronization.",
+    "path": ".agents/skills/exhaustive-audit-and-repair/SKILL.md",
+    "rel_path": ".agents/skills/exhaustive-audit-and-repair/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "external-resource",
+    "description": "Orchestrate external compute, frontier AI, and model testing: Google Flow batch asset generation, Gemini Deep Research, Cloud GPU/TPU pipelines, and multi-provider model benchmarks across 55+ models.",
+    "path": ".agents/skills/external-resource/SKILL.md",
+    "rel_path": ".agents/skills/external-resource/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "full-sync",
+    "description": "Universal multi-agent synchronization & context synthesis engine. Bi-directionally syncs skills between projects and brain, promotes universal context (ideas, mistakes, constraints, resources) via Markdown AST, mirrors to <VAULT_BACKUP_DIR>, and bootstraps workspaces.",
+    "path": ".agents/skills/full-sync/SKILL.md",
+    "rel_path": ".agents/skills/full-sync/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "hermes-agent-core",
+    "description": "Hermes autonomous agent architecture: SQLite+FTS5 persistent memory, user modeling, skill synthesis, and context compaction. Use for memory recall.",
+    "path": ".agents/skills/hermes-agent-core/SKILL.md",
+    "rel_path": ".agents/skills/hermes-agent-core/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "internal-tools",
+    "description": "Universal Internal Tooling Powerhouse: Build and orchestrate MCP servers (FastMCP/TypeScript), native Antigravity SDK tool schemas and subagent capabilities, Manifest V3 Chrome Extensions, and author standardized skills.",
+    "path": ".agents/skills/internal-tools/SKILL.md",
+    "rel_path": ".agents/skills/internal-tools/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "rea",
+    "description": "Reverse Engineer Anything (REA): Deep binary disassembly, decompilation, Electron/JS deobfuscation, Android APKs, .NET assemblies, WASM, and live runtime observation using the REA engine.",
+    "path": ".agents/skills/rea/SKILL.md",
+    "rel_path": ".agents/skills/rea/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "ui-design-engine",
+    "description": "Universal frontend design engine & quality orchestrator: dynamic archetype router, 15-point anti-slop verification, dark glassmorphism tokens, and component scaffolders.",
+    "path": ".agents/skills/ui-design-engine/SKILL.md",
+    "rel_path": ".agents/skills/ui-design-engine/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  },
+  {
+    "name": "web-search-orchestrator",
+    "description": "Multi-tier web search, scraping, and deep research engine integrating TinyFish, Tavily, Firecrawl, subagent isolation, and Gemini Deep Research. Use whenever live web search, documentation fetching, or deep research is required.",
+    "path": ".agents/skills/web-search-orchestrator/SKILL.md",
+    "rel_path": ".agents/skills/web-search-orchestrator/SKILL.md",
+    "category": "Universal Capabilities",
+    "scope": "Universal",
+    "target_project": "ALL"
+  }
+]
