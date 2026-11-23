@@ -219,16 +219,31 @@ return (function() {
     if (immersive && (immersive.innerText || '').trim().length > ((lastResp ? lastResp.innerText : '') || '').trim().length) {
         target = immersive;
     }
-    const contentRoot = target.querySelector('message-content, .model-response-text, .response-content, .markdown') || target;
+    const taskStepsNode = target.querySelector('spark-thinking-steps');
+    const taskStepsText = taskStepsNode ? (taskStepsNode.innerText || '').trim() : '';
+    const explicitContent = target.querySelector('message-content, .model-response-text, .markdown, .response-content');
+    const contentRoot = explicitContent || target;
 
     // 1. Full Formatted Text (preserving headings, lists, tables, code blocks)
-    let fullText = (contentRoot.innerText || '').replace(/^(?:Analyzing\s*|Show code\s*|Gemini said\s*)+/i, '').trim();
+    let rawBody = (contentRoot.innerText || '').trim();
+    if (taskStepsNode) {
+        if (/\bgemini said\b/i.test(rawBody)) {
+            rawBody = rawBody.replace(/^[\s\S]*?\bGemini said\s*/i, '').trim();
+        } else if (taskStepsText && rawBody.startsWith(taskStepsText)) {
+            rawBody = rawBody.slice(taskStepsText.length).trim();
+        }
+    }
+    let fullText = rawBody.replace(/^(?:Analyzing\s*|Show code\s*|Gemini said\s*)+/i, '').trim();
     if (!fullText || fullText.toLowerCase() === 'show code' || fullText.toLowerCase() === 'analyzing') {
         const codeResult = target.querySelector('.code-result-container, code-block, pre');
         if (codeResult && (codeResult.textContent || '').trim()) {
             fullText = (codeResult.textContent || '').trim();
         } else {
-            fullText = (target.textContent || '').replace(/^(?:Analyzing\s*|Show code\s*|Gemini said\s*)+/i, '').trim();
+            let fallbackText = (target.textContent || '').trim();
+            if (taskStepsNode && /\bgemini said\b/i.test(fallbackText)) {
+                fallbackText = fallbackText.replace(/^[\s\S]*?\bGemini said\s*/i, '').trim();
+            }
+            fullText = fallbackText.replace(/^(?:Analyzing\s*|Show code\s*|Gemini said\s*)+/i, '').trim();
         }
     }
     
@@ -335,6 +350,7 @@ return (function() {
         ok: true,
         text: fullText,
         markdown: markdownOut,
+        task_steps: taskStepsText,
         tables_count: tables.length,
         tables: tables,
         code_blocks_count: codeBlocks.length,

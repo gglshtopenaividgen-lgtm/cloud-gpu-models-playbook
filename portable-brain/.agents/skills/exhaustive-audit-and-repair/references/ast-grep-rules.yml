@@ -1,0 +1,106 @@
+# ast-grep YAML Rules for Universal Anti-Pattern Auditing
+# Compatible with ast-grep (sg scan) and fallback structural AST engines
+# License: MIT
+
+rules:
+  # ============================================================================
+  # 1. Ban Defective Subagents (DeepCoder / DeepInvestigator 1-Second Crash)
+  # ============================================================================
+  - id: ban-deepcoder-subagent-py
+    message: "CRITICAL: Subagent TypeName='DeepCoder' or 'DeepInvestigator' causes runtime crash due to missing skill_search component. Use TypeName='self' or 'research'."
+    severity: error
+    language: python
+    rule:
+      any:
+        - pattern: invoke_subagent($$$, TypeName="DeepCoder", $$$)
+        - pattern: invoke_subagent($$$, TypeName='DeepCoder', $$$)
+        - pattern: invoke_subagent($$$, TypeName="DeepInvestigator", $$$)
+        - pattern: invoke_subagent($$$, TypeName='DeepInvestigator', $$$)
+        - pattern: 'TypeName="DeepCoder"'
+        - pattern: "TypeName='DeepCoder'"
+        - pattern: 'TypeName="DeepInvestigator"'
+        - pattern: "TypeName='DeepInvestigator'"
+
+  - id: ban-deepcoder-subagent-ts
+    message: "CRITICAL: Subagent TypeName='DeepCoder' or 'DeepInvestigator' causes runtime crash. Use TypeName='self' or 'research'."
+    severity: error
+    language: typescript
+    rule:
+      any:
+        - pattern: '{ TypeName: "DeepCoder", $$$ }'
+        - pattern: "{ TypeName: 'DeepCoder', $$$ }"
+        - pattern: '{ TypeName: "DeepInvestigator", $$$ }'
+        - pattern: "{ TypeName: 'DeepInvestigator', $$$ }"
+
+  # ============================================================================
+  # 2. Ban Windows PowerShell && Command Chaining
+  # ============================================================================
+  - id: ban-windows-powershell-double-ampersand
+    message: "HIGH: Windows PowerShell does not support '&&' reliably across legacy versions and causes parser syntax errors. Use ';' or run commands as separate steps."
+    severity: warning
+    language: bash
+    rule:
+      pattern: "$$$ && $$$"
+
+  # ============================================================================
+  # 3. Mobile Touch Target Ergonomics (< 44px)
+  # ============================================================================
+  - id: mobile-touch-target-min-44px
+    message: "HIGH: Interactive touch target evaluates to < 44px height. Mobile ergonomics standard requires min-h-[44px] or height >= 44px on interactive elements."
+    severity: warning
+    language: tsx
+    rule:
+      any:
+        - pattern: '<button className="$$$ h-6 $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ h-7 $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ h-8 $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ h-9 $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ h-10 $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ min-h-[24px] $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ min-h-[32px] $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ min-h-[36px] $$$" $$$>$$$</button>'
+        - pattern: '<button className="$$$ min-h-[40px] $$$" $$$>$$$</button>'
+
+  # ============================================================================
+  # 4. Mobile Horizontal Viewport Overflow (< 375px)
+  # ============================================================================
+  - id: mobile-viewport-overflow
+    message: "HIGH: Fixed element width exceeds mobile viewport limit (375px) without responsive breakpoint prefix, causing horizontal scroll blowout."
+    severity: warning
+    language: tsx
+    rule:
+      any:
+        - pattern: '<div className="$$$ w-[400px] $$$" $$$>$$$</div>'
+        - pattern: '<div className="$$$ w-[500px] $$$" $$$>$$$</div>'
+        - pattern: '<div className="$$$ min-w-[400px] $$$" $$$>$$$</div>'
+        - pattern: '<div className="$$$ min-w-[500px] $$$" $$$>$$$</div>'
+
+  # ============================================================================
+  # 5. Hardcoded Localhost & Loopback URLs
+  # ============================================================================
+  - id: hardcoded-localhost-urls
+    message: "MEDIUM: Hardcoded localhost or loopback IP outside configuration/bridge files. Use environment variables or centralized service config."
+    severity: warning
+    language: python
+    rule:
+      any:
+        - pattern: '"http://localhost:$PORT"'
+        - pattern: "'http://localhost:$PORT'"
+        - pattern: '"http://127.0.0.1:$PORT"'
+        - pattern: "'http://127.0.0.1:$PORT'"
+
+  # ============================================================================
+  # 6. Hardcoded Secrets & API Keys
+  # ============================================================================
+  - id: hardcoded-secrets-tokens
+    message: "CRITICAL: Potential hardcoded API secret, private key, or bearer token detected. Move credentials to environment variables or secret vaults."
+    severity: error
+    language: python
+    rule:
+      any:
+        - pattern: '$VAR = "sk_live_$KEY"'
+        - pattern: "$VAR = 'sk_live_$KEY'"
+        - pattern: '$VAR = "ghp_$KEY"'
+        - pattern: "$VAR = 'ghp_$KEY'"
+        - pattern: '$VAR = "AKIA$KEY"'
+        - pattern: "$VAR = 'AKIA$KEY'"

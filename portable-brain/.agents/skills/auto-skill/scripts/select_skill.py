@@ -7,15 +7,31 @@ Usage:
     python select_skill.py                    # Interactive list of all skills with scope badges
     python select_skill.py <query>            # Search skills by keyword/domain
     python select_skill.py --universal        # Filter only Universal skills (safe for any project)
-    python select_skill.py --project project-web  # Filter skills scoped to a specific project
+    python select_skill.py --project flh-one  # Filter skills scoped to a specific project
 """
 
 import argparse
 import json
+import os
+import re
 import sys
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 REGISTRY_PATH = Path(__file__).parent.parent / "references" / "skill_registry.json"
+
+
+def _to_host_path(raw: Any) -> Path:
+    """Translate Windows drive paths (C:\\...) to WSL /mnt/<drive>/... when running on POSIX."""
+    s = str(raw).strip().strip("\"'")
+    if os.name == "posix":
+        m = re.match(r"^([A-Za-z]):[/\\]*(.*)$", s)
+        if m:
+            drive, rest = m.group(1).lower(), m.group(2).replace("\\", "/")
+            mnt_base = Path(f"/mnt/{drive}")
+            if mnt_base.exists():
+                return mnt_base / rest if rest else mnt_base
+    return Path(s)
 
 
 def load_skills():
@@ -27,6 +43,53 @@ def load_skills():
         return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     except Exception:
         return []
+
+
+def compute_relevance(s: Dict[str, Any], query: Optional[str]) -> Tuple[float, int, int]:
+    if not query:
+        return (1.0 if s.get("scope") == "Universal" else 0.0, 0, 0)
+
+    q = query.strip().lower()
+    tokens = [t for t in q.split() if t]
+    name = s.get("name", "").lower()
+    category = s.get("category", "").lower()
+    desc = s.get("description", "").lower()
+
+    score = 0.0
+
+    # 1. Exact skill name match: highest precedence
+    if name == q:
+        score += 10000.0
+
+    # 2. Full query substring match
+    if q in name:
+        score += 2000.0
+    elif q in category:
+        score += 600.0
+    elif q in desc:
+        score += 500.0
+
+    # 3. Number of matched query tokens in name + category + description
+    token_matches = 0
+    for tok in tokens:
+        in_name = tok in name
+        in_cat = tok in category
+        in_desc = tok in desc
+        if in_name:
+            score += 100.0
+            token_matches += 1
+        if in_cat:
+            score += 30.0
+            token_matches += 1
+        if in_desc:
+            score += 10.0
+            token_matches += 1
+
+    # 4. Universal tiebreaker
+    universal_bonus = 1.0 if s.get("scope") == "Universal" else 0.0
+    score += universal_bonus
+
+    return (score, token_matches, int(universal_bonus))
 
 
 def search_skills(query: str = None, category: str = None, universal_only: bool = False, project: str = None):
@@ -60,6 +123,7 @@ def search_skills(query: str = None, category: str = None, universal_only: bool 
         if matches_q and matches_c:
             filtered.append(s)
 
+    filtered.sort(key=lambda s: compute_relevance(s, q), reverse=True)
     return filtered
 
 
@@ -69,7 +133,7 @@ def main():
     parser.add_argument("--query", "-q", dest="query_flag", default=None, help="Search keywords flag")
     parser.add_argument("--cat", default=None, help="Filter by category")
     parser.add_argument("--universal", action="store_true", help="Show ONLY universal skills (safe for any project)")
-    parser.add_argument("--project", default=None, help="Filter by target project (e.g. 'project-web')")
+    parser.add_argument("--project", default=None, help="Filter by target project (e.g. 'flh-one')")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
     args = parser.parse_args()
@@ -103,9 +167,12 @@ def main():
 
         brain_root = Path(__file__).resolve().parents[4]
         rel = s.get("rel_path")
-
-        resolved_path = (brain_root / rel).resolve() if rel else Path(s["path"])
-        display_path = str(resolved_path) if resolved_path.exists() else s.get("rel_path", s["path"])
+        if rel:
+            cand = brain_root / rel
+            resolved_path = cand.resolve() if cand.exists() else _to_host_path(s.get("path", ""))
+        else:
+            resolved_path = _to_host_path(s.get("path", ""))
+        display_path = str(resolved_path) if resolved_path.exists() else s.get("rel_path", s.get("path", ""))
 
         print(f"  {idx}. \033[1m{s['name']}\033[0m  [{badge}]")
         print(f"     Path: {display_path}")

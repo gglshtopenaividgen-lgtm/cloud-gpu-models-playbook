@@ -13,21 +13,275 @@ Enforces:
 
 from __future__ import annotations
 
+import ctypes
 import json
+import math
 import os
 import sys
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).parent))
+import profile_manager
 
 LOCKS_FILE = Path(__file__).parent / "bridge_profile_locks.json"
+LOCKS_LOCK_FILE = Path(__file__).parent / "bridge_profile_locks.json.lock"
 SESSIONS_FILE = Path(__file__).parent / "bridge_sessions_map.json"
-FLEET_ORDER = ["Profile 14", "Profile 13", "Profile 7", "Profile 9", "Profile 16", "Profile 8"]
-PRIMARY_PROFILE_1 = "Profile 14"  # profile-2@example.com
-PRIMARY_PROFILE_2 = "Profile 13"  # profile-1@example.com
+FLOW_STATE_FILE = Path(__file__).parent / "bridge_flow_state.json"
+FLOW_REGISTRY_FILE = Path(__file__).parents[2] / "external-resource" / "references" / "flow_tool_registry.json"
+FLOW_SURFACE = "flow"
+LEGACY_FLOW_GLOBAL_LOCK = "flow_global"
+QUOTA_BUCKETS = ("aistudio_argon", "aistudio_neon", "gemini_web_neon", "notebooklm")
+
+try:
+    from filelock import FileLock, Timeout as FileLockTimeout
+    HAS_FILELOCK = True
+except ImportError:
+    HAS_FILELOCK = False
+    FileLock = None
+    FileLockTimeout = None
+
+
+@contextmanager
+def profile_lock_context(timeout: float = 10.0):
+    """Process-safe file lock around bridge_profile_locks.json to eliminate Windows NTFS race conditions."""
+    if HAS_FILELOCK and FileLock is not None:
+        lock = FileLock(str(LOCKS_LOCK_FILE), timeout=timeout)
+        with lock:
+            yield
+    else:
+        # Atomic fallback file lock
+        start = time.time()
+        acquired = False
+        fallback = Path(str(LOCKS_LOCK_FILE) + ".fallback")
+        while time.time() - start < timeout:
+            try:
+                fd = os.open(str(fallback), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(fd)
+                acquired = True
+                break
+            except (FileExistsError, OSError):
+                time.sleep(0.05)
+        if not acquired:
+            raise TimeoutError("Timed out acquiring the Chrome profile lease file lock")
+        try:
+            yield
+        finally:
+            if acquired and fallback.exists():
+                try:
+                    fallback.unlink()
+                except Exception:
+                    pass
+
+
+PRIMARY_WATSAPP_1 = "Profile 14"  # agent5@example.com
+PRIMARY_WATSAPP_2 = "Profile 13"  # agent6@example.com
 FAILSAFE_ORDER = ["Profile 7", "Profile 9", "Profile 16", "Profile 8"]
-DEFAULT_TIMEOUT_SEC = 300.0  # 5 minutes default lease (covers standard & high thinking)  # 5 minutes default lease (covers standard & high thinking)
+DEFAULT_TIMEOUT_SEC = 300.0  # 5 minutes default lease
 DEEP_RESEARCH_TIMEOUT_SEC = 900.0  # 15 minutes lease for deep research runs
+EVICTION_SURFACE = "__eviction__"
+
+
+def _load_flow_state() -> Dict[str, Any]:
+    if not FLOW_STATE_FILE.exists():
+        return {}
+    state = json.loads(FLOW_STATE_FILE.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise ValueError("Invalid Flow state ledger")
+    return state
+
+
+def _save_flow_state(state: Dict[str, Any]) -> None:
+    pending = FLOW_STATE_FILE.with_suffix(".json.tmp")
+    pending.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    os.replace(pending, FLOW_STATE_FILE)
+
+
+def _flow_deadline(seconds: float) -> float:
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("Flow lease or cooldown duration must be finite and positive")
+    return time.time() + seconds
+
+
+def acquire_flow_lock(agent_id: str, profile: str, lease_seconds: float = DEFAULT_TIMEOUT_SEC) -> Optional[str]:
+    """Reserve one Flow tab on an enabled manager profile within shared bridge capacity."""
+    if not agent_id:
+        raise ValueError("Flow lease owner is required")
+    if profile not in _flow_profiles():
+        return None
+    resources = _get_bridge_resources_json()
+    if not resources.get("ok"):
+        return None
+    with profile_lock_context():
+        state = _load_flow_state()
+        if LEGACY_FLOW_GLOBAL_LOCK in state:
+            if state[LEGACY_FLOW_GLOBAL_LOCK]["expires_at"] > time.time():
+                return None
+            del state[LEGACY_FLOW_GLOBAL_LOCK]
+            _save_flow_state(state)
+
+        locks = _load_active_locks()
+        key = _lock_key(profile, FLOW_SURFACE)
+        if _find_active_lock(locks, profile, surface=FLOW_SURFACE) or _lock_key(profile, EVICTION_SURFACE) in locks:
+            return None
+        active_profiles = set(resources["active_agent_profiles"]) | set(resources.get("pending_profiles", []))
+        active_profiles.update(info.get("profile") or name.split("::", 1)[0] for name, info in locks.items())
+        if profile not in active_profiles and len(active_profiles) >= min(3, resources["max_agent_profiles"]):
+            return None
+
+        owned = resources.get("owned_tabs", {})
+        active_flows = {info["profile"] for info in locks.values() if info.get("surface") == FLOW_SURFACE}
+        already_open = {name for name, tabs in owned.items() if any(tab.get("surface") == FLOW_SURFACE for tab in tabs.values())}
+        if profile in already_open:
+            return None  # A timed-out owner may have left a tab. Reconcile it first.
+        tabs = resources["active_agent_tabs"] + resources.get("pending_tabs", 0) + len(active_flows - already_open)
+        if tabs >= min(6, resources["max_agent_tabs"]):
+            return None
+
+        token = uuid.uuid4().hex
+        locks[key] = {
+            "profile": profile, "surface": FLOW_SURFACE, "task": "flow", "agent_id": agent_id,
+            "pid": os.getpid(), "token": token, "expires_at": _flow_deadline(lease_seconds),
+        }
+        _save_locks(locks)
+        return token
+
+
+def renew_flow_lock(agent_id: str, profile: str, token: str, lease_seconds: float = DEFAULT_TIMEOUT_SEC) -> bool:
+    """Extend a current lease while its Flow work is still running."""
+    with profile_lock_context():
+        locks = _load_active_locks()
+        lease = locks.get(_lock_key(profile, FLOW_SURFACE))
+        if not token or not lease or lease["agent_id"] != agent_id or lease.get("token") != token:
+            return False
+        lease["expires_at"] = _flow_deadline(lease_seconds)
+        _save_locks(locks)
+        return True
+
+
+def release_flow_lock(agent_id: str, profile: str, token: str) -> bool:
+    """Release only the matching lease generation after the Flow tab has closed."""
+    with profile_lock_context():
+        locks = _load_active_locks()
+        key = _lock_key(profile, FLOW_SURFACE)
+        lease = locks.get(key)
+        if not token or not lease or lease["agent_id"] != agent_id or lease.get("token") != token:
+            return False
+        del locks[key]
+        _save_locks(locks)
+        return True
+
+
+def _flow_profiles() -> Dict[str, Any]:
+    registry = json.loads(FLOW_REGISTRY_FILE.read_text(encoding="utf-8"))
+    return {
+        profile: info for profile, info in registry["profiles"].items()
+        if info.get("enabled") is True and info.get("role") == "pro_manager"
+    }
+
+
+def mark_flow_video_depleted(profile: str, cooldown_seconds: float = 1800.0, *, reason: str = "credits_depleted") -> None:
+    """Record the observed video cooldown for one enabled manager profile."""
+    if profile not in _flow_profiles():
+        raise ValueError(f"Flow profile is not an enabled Pro Manager: {profile!r}")
+    key = f"profile:{profile}"
+    with profile_lock_context():
+        state = _load_flow_state()
+        cooldowns = state.setdefault("flow_video_depleted", {})
+        previous = cooldowns.get(key, {}).get("until", 0)
+        cooldowns[key] = {"until": max(previous, _flow_deadline(cooldown_seconds)), "reason": reason}
+        _save_flow_state(state)
+
+
+def pick_flow_profile(modality: Literal["image", "video"] = "image", *, open_profiles: Optional[set[str]] = None) -> Optional[str]:
+    """Choose a Flow candidate from the current Pro fleet without opening a profile."""
+    if modality not in ("image", "video"):
+        raise ValueError(f"Unsupported Flow modality: {modality!r}")
+    metadata = _flow_profiles()
+    with profile_lock_context():
+        cooldowns = _load_flow_state().get("flow_video_depleted", {})
+        locks = _load_active_locks()
+    now = time.time()
+    candidates = []
+    for p in profile_manager.get_ai_premium_profiles():
+        if p.dir_name not in metadata or not p.has_bridge_extension or p.cooldown_until > now:
+            continue
+        if _find_active_lock(locks, p.dir_name, surface=FLOW_SURFACE) or _lock_key(p.dir_name, EVICTION_SURFACE) in locks:
+            continue
+        if modality == "video" and cooldowns.get(f"profile:{p.dir_name}", {}).get("until", 0) > now:
+            continue
+        candidates.append(p)
+
+    if modality == "image" and open_profiles is None:
+        connected_profiles = _get_connected_profiles()
+        open_profiles = {p.dir_name for p in candidates if p.dir_name in connected_profiles and _is_profile_truly_open(p.dir_name)}
+    open_profiles = open_profiles or set()
+
+    def priority(p: profile_manager.ChromeProfile) -> tuple:
+        data = metadata.get(p.dir_name, {})
+        is_daily = p.is_daily_driver or data.get("tier") == "daily_driver"
+        image_reuse = modality == "image" and p.dir_name in open_profiles
+        return is_daily, not image_reuse, data.get("priority", 100), p.dir_name
+
+    selected = min(candidates, key=priority, default=None)
+    return selected.dir_name if selected else None
+
+
+def get_fleet_order() -> List[str]:
+    """Dynamically builds the AI Pro fleet list from Local State (Tier 1 Alts first, Daily Drivers last)."""
+    try:
+        profs = profile_manager.get_ai_premium_profiles()
+        tier1 = [p.dir_name for p in profs if not p.is_daily_driver]
+        tier2 = [p.dir_name for p in profs if p.is_daily_driver]
+        # Keep Profile 14 / Profile 13 near the top of Tier 1 if present
+        ordered_t1: List[str] = []
+        for pref in (PRIMARY_WATSAPP_1, PRIMARY_WATSAPP_2):
+            if pref in tier1:
+                ordered_t1.append(pref)
+        for d in tier1:
+            if d not in ordered_t1:
+                ordered_t1.append(d)
+        return ordered_t1 + tier2
+    except Exception:
+        return [PRIMARY_WATSAPP_1, PRIMARY_WATSAPP_2, *FAILSAFE_ORDER]
+
+
+FLEET_ORDER = get_fleet_order()
+
+
+def _lock_key(profile: str, surface: Optional[str] = None) -> str:
+    return f"{profile}::{surface}" if surface else profile
+
+
+def _is_pid_alive(pid: Any) -> bool:
+    """Returns True if process ID is still running (or cannot be queried safely)."""
+    if not isinstance(pid, int) or pid <= 0:
+        return True
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong(0)
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:
+        return True
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -49,45 +303,170 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
         print(f"[ProfileLock] Warning saving {path.name}: {e}", file=sys.stderr)
 
 
-def _read_locks() -> Dict[str, Any]:
-    return _read_json(LOCKS_FILE)
-
-
-def _write_locks(locks: Dict[str, Any]) -> None:
-    _write_json(LOCKS_FILE, locks)
-
-
-def clean_expired_locks() -> Dict[str, Any]:
-    """Purges expired leases and returns active locks."""
+def _load_active_locks() -> Dict[str, Any]:
+    """Read and prune the lease ledger while the caller holds its file lock."""
     now = time.time()
-    locks = _read_locks()
-    changed = False
+    if not LOCKS_FILE.exists():
+        return {}
+    locks = json.loads(LOCKS_FILE.read_text(encoding="utf-8"))
+    if not isinstance(locks, dict):
+        raise ValueError("Invalid Chrome profile lease ledger")
     active = {}
-    for prof, info in locks.items():
+    for prof_key, info in locks.items():
+        if not isinstance(info, dict):
+            raise ValueError("Invalid Chrome profile lease entry")
         exp = info.get("expires_at", 0)
-        if exp > now:
-            active[prof] = info
-        else:
-            changed = True
-    if changed:
-        _write_locks(active)
+        pid = info.get("pid")
+        if exp > now and _is_pid_alive(pid):
+            active[prof_key] = info
+    if active != locks:
+        _save_locks(active)
     return active
 
 
-def get_live_profile_status() -> Dict[str, Any]:
-    """Returns a full observability status report of all fleet profiles, active agent leases, and usage."""
-    active_locks = clean_expired_locks()
-    
-    # Try importing profile_manager for account identities and quota state
-    profiles_meta = {}
-    quota_state = {}
+def _save_locks(locks: Dict[str, Any]) -> None:
+    pending = LOCKS_FILE.with_suffix(".json.tmp")
+    pending.write_text(json.dumps(locks, indent=2), encoding="utf-8")
+    os.replace(pending, LOCKS_FILE)
+
+
+def _read_locks() -> Dict[str, Any]:
+    with profile_lock_context():
+        return _load_active_locks()
+
+
+def _write_locks(locks: Dict[str, Any]) -> None:
+    with profile_lock_context():
+        _save_locks(locks)
+
+
+def clean_expired_locks() -> Dict[str, Any]:
+    """Purges expired or dead-PID leases and returns active locks."""
+    return {key: info for key, info in _read_locks().items() if info.get("surface") != EVICTION_SURFACE}
+
+
+def is_profile_evicting(profile: str) -> bool:
+    with profile_lock_context():
+        return _lock_key(profile, EVICTION_SURFACE) in _load_active_locks()
+
+
+@contextmanager
+def idle_profile_eviction(profile: str):
+    """Prevent new profile leases until an already-idle profile has been closed."""
+    key = _lock_key(profile, EVICTION_SURFACE)
+    with profile_lock_context():
+        locks = _load_active_locks()
+        acquired = _find_active_lock(locks, profile) is None
+        if acquired:
+            locks[key] = {
+                "profile": profile,
+                "surface": EVICTION_SURFACE,
+                "pid": os.getpid(),
+                "expires_at": time.time() + DEFAULT_TIMEOUT_SEC,
+            }
+            _save_locks(locks)
     try:
-        import profile_manager
+        yield acquired
+    finally:
+        if acquired:
+            with profile_lock_context():
+                locks = _load_active_locks()
+                if locks.get(key, {}).get("pid") == os.getpid():
+                    del locks[key]
+                    _save_locks(locks)
+
+
+def mark_bucket_cooldown(profile: str, bucket: str, cooldown_seconds: int = 1800, reason: str = "") -> None:
+    """Marks one independent quota bucket (e.g. 'aistudio_argon', 'gemini_web_neon') in cooldown."""
+    state = profile_manager.load_quota_state()
+    p_state = state.setdefault(profile, {})
+    buckets = p_state.setdefault("buckets", {})
+    now = time.time()
+    buckets[bucket] = {
+        "cooldown_until": now + max(1, int(cooldown_seconds)),
+        "reason": reason or "quota_exhausted",
+        "updated_at": now,
+    }
+    profile_manager.save_quota_state(state)
+    print(f"[ProfileLock] Bucket '{bucket}' on '{profile}' marked COOLDOWN for {cooldown_seconds}s ({reason or 'quota'}).")
+
+
+def is_bucket_available(profile: str, bucket: Optional[str] = None) -> bool:
+    """Checks global cooldown, NEEDS_REAUTH, and per-bucket cooldown for a profile."""
+    state = profile_manager.load_quota_state()
+    p_state = state.get(profile, {})
+    now = time.time()
+    if p_state.get("cooldown_until", 0.0) > now:
+        return False
+    reauth = p_state.get("needs_reauth", {})
+    if isinstance(reauth, dict) and any(v for v in reauth.values()):
+        # Surface-specific reauth check
+        surf_map = {"aistudio_argon": "aistudio", "aistudio_neon": "aistudio", "gemini_web_neon": "gemini_web", "notebooklm": "notebook"}
+        surf = surf_map.get(bucket or "")
+        if surf and reauth.get(surf):
+            return False
+    if bucket:
+        b_info = p_state.get("buckets", {}).get(bucket, {})
+        if isinstance(b_info, dict) and b_info.get("cooldown_until", 0.0) > now:
+            return False
+    return True
+
+
+def mark_profile_needs_reauth(profile: str, surface: str) -> None:
+    """Flags a profile as requiring manual sign-in on the specified surface."""
+    state = profile_manager.load_quota_state()
+    p_state = state.setdefault(profile, {})
+    reauth = p_state.setdefault("needs_reauth", {})
+    reauth[surface] = time.time()
+    profile_manager.save_quota_state(state)
+    print(f"[ProfileLock] Profile '{profile}' flagged NEEDS_REAUTH on surface '{surface}'.")
+
+
+def clear_needs_reauth(profile: str, surface: Optional[str] = None) -> None:
+    """Clears NEEDS_REAUTH flag for a surface (or all surfaces)."""
+    state = profile_manager.load_quota_state()
+    p_state = state.get(profile, {})
+    reauth = p_state.get("needs_reauth")
+    if isinstance(reauth, dict):
+        if surface:
+            reauth.pop(surface, None)
+        else:
+            p_state["needs_reauth"] = {}
+        profile_manager.save_quota_state(state)
+
+
+def _find_active_lock(active_locks: Dict[str, Any], profile: str, surface: Optional[str] = None) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Finds any conflicting active lock for (profile, surface)."""
+    if surface:
+        scoped_k = _lock_key(profile, surface)
+        if scoped_k in active_locks:
+            return scoped_k, active_locks[scoped_k]
+        if profile in active_locks:
+            return profile, active_locks[profile]
+        return None
+    # Unscoped callers respect either bare profile lock or any surface lock on that profile
+    if profile in active_locks:
+        return profile, active_locks[profile]
+    prefix = f"{profile}::"
+    for k, v in active_locks.items():
+        if k.startswith(prefix):
+            return k, v
+    return None
+
+
+def get_live_profile_status() -> Dict[str, Any]:
+    """Returns full observability status across all discovered AI Pro profiles, buckets, and leases."""
+    active_locks = clean_expired_locks()
+    profiles_meta: Dict[str, Dict[str, Any]] = {}
+    quota_state: Dict[str, Any] = {}
+    try:
         for p in profile_manager.get_all_profiles():
             profiles_meta[p.dir_name] = {
                 "name": p.name,
                 "email": p.email,
                 "is_ai_premium": p.is_ai_premium,
+                "is_daily_driver": p.is_daily_driver,
+                "has_bridge_extension": p.has_bridge_extension,
                 "status": p.status,
                 "cooldown_until": p.cooldown_until,
             }
@@ -95,14 +474,14 @@ def get_live_profile_status() -> Dict[str, Any]:
     except Exception:
         pass
 
-    status = {}
+    status: Dict[str, Any] = {}
     now = time.time()
-    for prof in FLEET_ORDER:
-        lock = active_locks.get(prof)
+    for prof in get_fleet_order():
+        lock_match = _find_active_lock(active_locks, prof)
+        lock = lock_match[1] if lock_match else None
         p_meta = profiles_meta.get(prof, {})
         q_meta = quota_state.get(prof, {})
 
-        # Compute status
         cooldown_until = p_meta.get("cooldown_until", 0.0)
         is_cooldown = cooldown_until > now
 
@@ -135,6 +514,9 @@ def get_live_profile_status() -> Dict[str, Any]:
             "profile": prof,
             "name": p_meta.get("name", prof),
             "email": p_meta.get("email", ""),
+            "tier_bucket": "TIER_2_DAILY_DRIVER" if p_meta.get("is_daily_driver") else "TIER_1_ALT_PRO",
+            "is_daily_driver": bool(p_meta.get("is_daily_driver")),
+            "has_bridge_extension": bool(p_meta.get("has_bridge_extension")),
             "status": prof_status,
             "holder": holder,
             "task": task,
@@ -142,6 +524,8 @@ def get_live_profile_status() -> Dict[str, Any]:
             "remaining_seconds": max(0, remaining) if remaining is not None else None,
             "tab_id": tab_id,
             "session_id": session_id,
+            "buckets": q_meta.get("buckets", {}),
+            "needs_reauth": q_meta.get("needs_reauth", {}),
             "current_usage_percent": q_meta.get("current_usage_percent"),
             "weekly_usage_percent": q_meta.get("weekly_usage_percent"),
             "current_reset": q_meta.get("current_reset"),
@@ -151,14 +535,25 @@ def get_live_profile_status() -> Dict[str, Any]:
     return status
 
 
-def is_bridge_running() -> bool:
-    """Checks if the local Argon Bridge daemon is running and reachable on port 9229."""
-    try:
-        import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:9229/status", timeout=1.0) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+def is_bridge_running(timeout: float = 2.5) -> bool:
+    """Checks if the local Argon Bridge daemon is running and reachable on port 9229 (/health -> /status)."""
+    import urllib.request
+    import urllib.error
+
+    for attempt in range(2):
+        for ep in ("/health", "/status"):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:9229{ep}", timeout=timeout) as resp:
+                    if resp.status == 200:
+                        return True
+            except urllib.error.HTTPError as e:
+                if e.code == 404 and ep == "/health":
+                    continue
+            except Exception:
+                break
+        if attempt == 0:
+            time.sleep(0.3)
+    return False
 
 
 def ensure_bridge_running() -> bool:
@@ -202,131 +597,192 @@ def ping_profile(profile: str, timeout: float = 1.5) -> bool:
     return False
 
 
-def launch_profile_candidate(profile: str) -> bool:
-    """Attempts to launch Chrome for the candidate profile via bridge /launch or profile_manager."""
-    # Method 1: Try bridge /launch endpoint
+def _get_bridge_status_json() -> Dict[str, Any]:
     try:
         import urllib.request
-        req_data = json.dumps({"profile": profile}).encode("utf-8")
+        with urllib.request.urlopen("http://127.0.0.1:9229/status", timeout=3.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _get_bridge_resources_json() -> Dict[str, Any]:
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:9229/resources", timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _is_profile_truly_open(profile: str) -> bool:
+    """Verifies via LIST_TABS (not stale REGISTER tabs_count) whether profile has >= 1 open window tab."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "http://127.0.0.1:9229/command",
+            data=json.dumps({"action": "LIST_TABS", "profile": profile, "params": {}, "timeout": 4.0}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return bool(data.get("ok") and isinstance(data.get("tabs"), list) and len(data["tabs"]) > 0)
+    except Exception:
+        return False
+
+
+def launch_profile_candidate(profile: str, max_open: int = 3, auto_close_idle: bool = True) -> bool:
+    """Attempts to launch a Chrome profile via interactive /profile/open host endpoint first, then /launch."""
+    import urllib.request
+    status_data = _get_bridge_status_json()
+    if status_data.get("interactive_desktop"):
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:9229/profile/open",
+                data=json.dumps({"profile": profile, "max_open": max_open, "auto_close_idle": auto_close_idle, "timeout": 15.0}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=22.0) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if res.get("ok"):
+                    return True
+        except Exception as e:
+            print(f"[ProfileLock] Note /profile/open for '{profile}': {e}", file=sys.stderr)
+        return False
+
+    try:
         req = urllib.request.Request(
             "http://127.0.0.1:9229/launch",
-            data=req_data,
+            data=json.dumps({"profile": profile}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=3.0) as resp:
-            if resp.status == 200:
-                res = json.loads(resp.read().decode("utf-8"))
-                if res.get("ok"):
-                    return True
+            if resp.status == 200 and json.loads(resp.read().decode("utf-8")).get("ok"):
+                return True
     except Exception:
         pass
-
-    # Method 2: Direct profile_manager launch
-    try:
-        import profile_manager
-        profile_manager.launch_profile_window(profile)
-        return True
-    except Exception as e:
-        print(f"[ProfileLock] Warning launching window for '{profile}': {e}", file=sys.stderr)
-        return False
+    return False
 
 
 def _get_connected_profiles() -> set:
     """Queries local bridge /status to identify which Chrome profiles have live connected extensions."""
-    try:
-        import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:9229/status", timeout=2.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return {c.get("dir_name") for c in data.get("connected_extensions", []) if c.get("dir_name")}
-    except Exception:
-        return set()
+    data = _get_bridge_status_json()
+    return {c.get("dir_name") for c in data.get("connected_extensions", []) if c.get("dir_name")}
 
 
-def pick_optimal_idle_profile(preferred_order: Optional[List[str]] = None) -> Optional[str]:
-    """Autonomous selector: picks the best idle profile with strict user-mandated hierarchy:
+def pick_optimal_idle_profile(
+    preferred_order: Optional[List[str]] = None,
+    surface: Optional[str] = None,
+    bucket: Optional[str] = None,
+    max_open: int = 3,
+) -> Optional[str]:
+    """Waterfall Drain selector across all AI Pro profiles:
 
-    Priority 1: Profile 14 (profile-2@example.com)
-    Priority 2: Profile 13 (profile-1@example.com)
-    Failsafes: Profile 7, Profile 9, Profile 16, Profile 8
-
-    For each candidate in the hierarchy:
-    1. Skips if BUSY, COOLDOWN, or quota exhausted (>=95%).
-    2. Verifies live WebSocket responsiveness via server.py's /ping_profile?profile=<candidate>.
-    3. If not connected, attempts launch and polls /ping_profile for up to 8s (0.5s intervals).
-    4. If responsive, selects profile immediately.
-    5. If still offline after 8s, steps down to the next priority profile in the hierarchy.
+    1. Partition Tier 1 Alt Pros vs Tier 2 Daily Drivers (strictly last resort).
+    2. Within each tier, drain ALREADY-OPEN profiles (`LIST_TABS > 0`) completely before launching closed ones.
+    3. Verify surface lock (`f'{profile}::{surface}'`), bucket cooldown, `NEEDS_REAUTH`, and 95% 5h usage guard.
+    4. If no open Tier 1 Alt is ready and host daemon is interactive (`WinSta0\\Default`), launch next idle Tier 1 Alt
+       via `/profile/open` (`auto_close_idle=True`); otherwise emit `[PROFILE_ROTATION_NEEDED]`.
+    5. Only select Tier 2 Daily Drivers if ALL Tier 1 Alts are unavailable/exhausted (`[LAST_RESORT_DAILY_DRIVER]`).
     """
     ensure_bridge_running()
-    status = get_live_profile_status()
+    max_open = max(1, min(int(max_open or 3), 3))
+    active_locks = clean_expired_locks()
+    status_map = get_live_profile_status()
+    bridge_status = _get_bridge_status_json()
+    resources_data = _get_bridge_resources_json()
+    active_agent_profiles = set(resources_data.get("active_agent_profiles") or [])
+    max_agent_profiles = min(max_open, int(resources_data.get("max_agent_profiles") or max_open))
+    connected_dirs = {c.get("dir_name") for c in bridge_status.get("connected_extensions", []) if c.get("dir_name")}
+    interactive_host = bool(bridge_status.get("interactive_desktop", False))
 
-    hierarchy = preferred_order or [
-        PRIMARY_PROFILE_1,  # Priority 1: Profile 14
-        PRIMARY_PROFILE_2,  # Priority 2: Profile 13
-        *FAILSAFE_ORDER,     # Failsafes: Profile 7, Profile 9, Profile 16, Profile 8
-    ]
+    base_order = preferred_order or get_fleet_order()
+    tier1_order: List[str] = []
+    tier2_order: List[str] = []
+    for prof in base_order:
+        info = status_map.get(prof, {})
+        if info.get("is_daily_driver"):
+            tier2_order.append(prof)
+        else:
+            tier1_order.append(prof)
 
-    for prof in hierarchy:
-        info = status.get(prof, {})
-        prof_status = info.get("status", "IDLE")
+    open_dirs = [p for p in connected_dirs if _is_profile_truly_open(p)]
+    open_set = set(open_dirs)
 
-        # Skip if currently locked or in rate-limit cooldown
-        if prof_status != "IDLE":
-            print(f"[ProfileLock] Candidate '{prof}' is not IDLE ({prof_status}, holder: {info.get('holder')}). Skipping...")
-            continue
-
-        # Skip if 5-hour quota is exhausted (>= 95%)
+    def _is_candidate_eligible(prof: str) -> Tuple[bool, str]:
+        if _find_active_lock(active_locks, prof, surface=surface):
+            return False, "locked"
+        if not is_bucket_available(prof, bucket=bucket):
+            return False, f"bucket_cooldown({bucket or 'global'})"
+        info = status_map.get(prof, {})
         usage_pct = info.get("current_usage_percent")
         if usage_pct is not None and usage_pct >= 95:
-            print(f"[ProfileLock] Candidate '{prof}' skipped: quota exhausted ({usage_pct}% >= 95%).")
-            continue
+            return False, f"quota_95%({usage_pct}%)"
+        return True, "ok"
 
-        if prof == PRIMARY_PROFILE_1:
-            tier_desc = "Priority 1 (profile-2@example.com)"
-        elif prof == PRIMARY_PROFILE_2:
-            tier_desc = "Priority 2 (profile-1@example.com)"
-        else:
-            tier_desc = f"Failsafe ({prof})"
+    def _try_tier(candidates: List[str], is_daily_tier: bool) -> Optional[str]:
+        # Prefer already-open profiles ALREADY in active_agent_profiles -> other already-open profiles -> closed
+        open_agent_first = [p for p in candidates if p in open_set and p in active_agent_profiles]
+        open_other = [p for p in candidates if p in open_set and p not in active_agent_profiles]
+        closed_cands = [p for p in candidates if p not in open_set]
+        ordered = open_agent_first + open_other + closed_cands
 
-        print(f"[ProfileLock] Testing candidate '{prof}' [{tier_desc}] for live responsiveness...")
-
-        # 1. Live WebSocket responsiveness check via /ping_profile
-        if ping_profile(prof):
-            print(f"[ProfileLock] ✅ Profile '{prof}' ({tier_desc}) is online and responsive to WebSocket ping. Selected.")
-            return prof
-
-        # 2. Not connected: attempt launch and poll /ping_profile for up to 8s (0.5s intervals)
-        print(f"[ProfileLock] Profile '{prof}' ({tier_desc}) is not connected. Attempting launch...")
-        launched = launch_profile_candidate(prof)
-        if launched:
-            print(f"[ProfileLock] Polling /ping_profile for '{prof}' up to 8.0s (0.5s intervals)...")
-            start_poll = time.time()
-            online = False
-            while time.time() - start_poll < 8.0:
-                time.sleep(0.5)
-                if ping_profile(prof):
-                    online = True
-                    break
-
-            if online:
-                elapsed = round(time.time() - start_poll, 2)
-                print(f"[ProfileLock] ✅ Profile '{prof}' ({tier_desc}) came online in {elapsed}s and responded to WebSocket ping. Selected.")
+        for prof in ordered:
+            ok, reason = _is_candidate_eligible(prof)
+            if not ok:
+                continue
+            # Never exceed MAX_AGENT_PROFILES (3) by expanding onto a 4th distinct profile
+            if len(active_agent_profiles) >= max_agent_profiles and prof not in active_agent_profiles:
+                continue
+            tier_tag = "[LAST_RESORT_DAILY_DRIVER]" if is_daily_tier else "[Tier1-Alt]"
+            if prof in open_set and ping_profile(prof):
+                print(f"[ProfileLock] {tier_tag} Waterfall Drain selected open profile '{prof}'.")
                 return prof
+            if interactive_host or prof in connected_dirs:
+                if launch_profile_candidate(prof, max_open=max_open, auto_close_idle=True):
+                    t0 = time.time()
+                    while time.time() - t0 < 8.0:
+                        if ping_profile(prof):
+                            print(f"[ProfileLock] {tier_tag} Launched & verified '{prof}'.")
+                            return prof
+                        time.sleep(0.5)
+        return None
 
-        print(f"[ProfileLock] ⚠️ Profile '{prof}' ({tier_desc}) still offline after 8s launch attempt. Stepping down to next priority profile in hierarchy...")
+    chosen = _try_tier(tier1_order, is_daily_tier=False)
+    if chosen:
+        return chosen
 
-    print("[ProfileLock] ❌ All browser profiles in hierarchy failed /ping_profile or launch verification.")
+    # Non-blocking rotation guidance if Tier 1 open profiles are exhausted and host rotation couldn't open a cold one
+    idle_closed_tier1 = [p for p in tier1_order if p not in open_set and _is_candidate_eligible(p)[0]]
+    if idle_closed_tier1 and not interactive_host:
+        print(
+            f"[PROFILE_ROTATION_NEEDED] Active Tier 1 Alt profile(s) ({open_dirs or 'none'}) exhausted on bucket '{bucket or 'default'}'. "
+            f"Close an exhausted profile and open '{idle_closed_tier1[0]}' (or start Start_Gemini_Session.bat on Desktop).",
+            file=sys.stderr,
+        )
+
+    chosen_daily = _try_tier(tier2_order, is_daily_tier=True)
+    if chosen_daily:
+        print(f"[LAST_RESORT_DAILY_DRIVER] All Tier 1 Alt accounts exhausted/offline; falling back to '{chosen_daily}'.", file=sys.stderr)
+        return chosen_daily
+
+    print("[ProfileLock] All AI Pro profiles exhausted, busy, or offline.")
     return None
 
 
-def renew_profile_lease(profile: str, agent_id: str, extend_seconds: float = 180.0) -> bool:
-    """Heartbeat: extends the lease on a profile while generation or research is actively proceeding."""
-    locks = clean_expired_locks()
-    lock = locks.get(profile)
-    if lock and lock.get("agent_id") == agent_id:
-        lock["expires_at"] = time.time() + extend_seconds
-        _write_locks(locks)
-        return True
+def renew_profile_lease(profile: str, agent_id: str, extend_seconds: float = 180.0, surface: Optional[str] = None) -> bool:
+    """Heartbeat: extends the lease on a profile/surface while generation is actively proceeding."""
+    with profile_lock_context():
+        locks = _load_active_locks()
+        match = _find_active_lock(locks, profile, surface=surface)
+        if match and match[1].get("surface") != FLOW_SURFACE and match[1].get("agent_id") == agent_id:
+            match[1]["expires_at"] = time.time() + extend_seconds
+            _save_locks(locks)
+            return True
     return False
 
 
@@ -338,15 +794,13 @@ def acquire_profile_lease(
     deep_research: bool = False,
     tab_id: Optional[int] = None,
     lease_seconds: Optional[float] = None,
+    surface: Optional[str] = None,
+    bucket: Optional[str] = None,
+    max_open: int = 3,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Acquires a profile lease for the calling agent.
-    
-    Observability & Dynamic Routing:
-    - If preferred_profile is idle: acquires it immediately.
-    - If preferred_profile is busy: reports the active holder/task and auto-routes to an idle profile with lowest usage.
-    - If preferred_profile is None: picks the optimal idle profile automatically.
-    - Supports session affinity: reuses profile previously bound to session_id if free.
-    """
+    """Acquires a surface-scoped profile lease using 11-profile Waterfall Drain & 4-bucket quota state."""
+    if surface == FLOW_SURFACE:
+        return None, "Use acquire_flow_lock for Flow leases."
     now = time.time()
     ttl = lease_seconds or (DEEP_RESEARCH_TIMEOUT_SEC if deep_research else DEFAULT_TIMEOUT_SEC)
     active_locks = clean_expired_locks()
@@ -354,73 +808,83 @@ def acquire_profile_lease(
 
     target_prof = None
 
-    # 1. Check session affinity first (sticky multi-turn conversation)
     if session_id and session_id in sessions:
         bound_prof = sessions[session_id].get("profile")
         if bound_prof:
-            current_lock = active_locks.get(bound_prof)
-            if not current_lock or current_lock.get("agent_id") == agent_id:
+            match = _find_active_lock(active_locks, bound_prof, surface=surface)
+            if (not match or match[1].get("agent_id") == agent_id) and is_bucket_available(bound_prof, bucket=bucket):
                 target_prof = bound_prof
 
-    # 2. Check preferred profile if specified
     if not target_prof and preferred_profile:
-        current_lock = active_locks.get(preferred_profile)
-        if current_lock and current_lock.get("agent_id") != agent_id:
-            holder = current_lock.get("agent_id", "another agent")
-            task_desc = current_lock.get("task", "task")
-            rem = max(0, int(current_lock.get("expires_at", now) - now))
-            print(
-                f"[ProfileLock] Preferred '{preferred_profile}' is BUSY (held by '{holder}' for '{task_desc}', {rem}s remaining)."
-            )
-            print("[ProfileLock] Auto-negotiating optimal idle profile in hierarchy...")
-            target_prof = pick_optimal_idle_profile()
+        match = _find_active_lock(active_locks, preferred_profile, surface=surface)
+        if match and match[1].get("agent_id") != agent_id:
+            rem = max(0, int(match[1].get("expires_at", now) - now))
+            print(f"[ProfileLock] '{preferred_profile}' ({surface or 'all'}) BUSY ({rem}s remaining). Routing to Waterfall Drain...")
+            target_prof = pick_optimal_idle_profile(surface=surface, bucket=bucket, max_open=max_open)
         else:
-            # Preferred profile is idle: verify responsiveness / launch, falling back to hierarchy if offline
-            pref_hierarchy = [preferred_profile] + [p for p in FLEET_ORDER if p != preferred_profile]
-            target_prof = pick_optimal_idle_profile(preferred_order=pref_hierarchy)
-
-    # 3. If not assigned, pick optimal idle profile across fleet using strict hierarchy
-    if not target_prof:
-        target_prof = pick_optimal_idle_profile()
-        if target_prof:
-            print(f"[ProfileLock] Assigned idle profile '{target_prof}' to agent '{agent_id}'.")
+            pref_order = [preferred_profile] + [p for p in get_fleet_order() if p != preferred_profile]
+            target_prof = pick_optimal_idle_profile(preferred_order=pref_order, surface=surface, bucket=bucket, max_open=max_open)
 
     if not target_prof:
-        holders = {p: f"{active_locks[p].get('agent_id')} ({active_locks[p].get('task', 'task')})" for p in active_locks}
-        return None, f"All Google One AI Premium profiles are offline, busy, or in cooldown: {holders}. Please wait or select another profile."
+        target_prof = pick_optimal_idle_profile(surface=surface, bucket=bucket, max_open=max_open)
 
-    # Record the lease
-    active_locks[target_prof] = {
-        "agent_id": agent_id,
-        "task": task,
-        "session_id": session_id,
-        "tab_id": tab_id,
-        "locked_at": now,
-        "expires_at": now + ttl,
-    }
-    _write_locks(active_locks)
+    if not target_prof:
+        return None, f"All AI Pro profiles are offline, busy, or exhausted on bucket '{bucket or 'default'}'."
 
-    # Update session affinity
-    if session_id:
-        sessions[session_id] = {
-            "profile": target_prof,
-            "agent_id": agent_id,
-            "last_active": now,
+    with profile_lock_context():
+        active_locks = _load_active_locks()
+        if _lock_key(target_prof, EVICTION_SURFACE) in active_locks:
+            return None, f"Profile '{target_prof}' is being closed."
+        same_profile = {
+            key: info for key, info in active_locks.items()
+            if (info.get("profile") or key.split("::", 1)[0]) == target_prof
         }
-        _write_json(SESSIONS_FILE, sessions)
+        relevant_locks = (
+            [info for key, info in same_profile.items() if key in (target_prof, _lock_key(target_prof, surface))]
+            if surface else same_profile.values()
+        )
+        if any(info.get("agent_id") != agent_id for info in relevant_locks):
+            return None, f"Profile '{target_prof}' became busy while it was being selected."
+        leased_profiles = {info.get("profile") or key.split("::", 1)[0] for key, info in active_locks.items()}
+        if target_prof not in leased_profiles and len(leased_profiles) >= max(1, min(int(max_open or 3), 3)):
+            return None, "Chrome agent profile lease capacity reached."
+        now = time.time()
+        active_locks[_lock_key(target_prof, surface=surface)] = {
+            "profile": target_prof,
+            "surface": surface or "all",
+            "bucket": bucket or "default",
+            "agent_id": agent_id,
+            "pid": os.getpid(),
+            "task": task,
+            "session_id": session_id,
+            "tab_id": tab_id,
+            "locked_at": now,
+            "expires_at": now + ttl,
+        }
+        _save_locks(active_locks)
+
+        if session_id:
+            sessions = _read_json(SESSIONS_FILE)
+            sessions[session_id] = {"profile": target_prof, "agent_id": agent_id, "last_active": now}
+            _write_json(SESSIONS_FILE, sessions)
 
     return target_prof, None
 
 
-def release_profile_lease(profile: str, agent_id: Optional[str] = None) -> bool:
-    """Releases the lock on a profile so other agents can immediately acquire it."""
-    active_locks = clean_expired_locks()
-    if profile in active_locks:
-        current_holder = active_locks[profile].get("agent_id")
+def release_profile_lease(profile: str, agent_id: Optional[str] = None, surface: Optional[str] = None) -> bool:
+    """Releases the surface-scoped (or legacy unscoped) lock on a profile."""
+    with profile_lock_context():
+        active_locks = _load_active_locks()
+        key = _lock_key(profile, surface=surface)
+        target_key = key if key in active_locks else (profile if profile in active_locks else None)
+        if not target_key:
+            return True
+        current_holder = active_locks[target_key].get("agent_id")
+        if active_locks[target_key].get("surface") == FLOW_SURFACE:
+            return False
         if agent_id and current_holder != agent_id:
             return False
-        del active_locks[profile]
-        _write_locks(active_locks)
-        print(f"[ProfileLock] Released lease on '{profile}' (now IDLE).")
+        del active_locks[target_key]
+        _save_locks(active_locks)
+        print(f"[ProfileLock] Released lease '{target_key}' (now IDLE).")
         return True
-    return True

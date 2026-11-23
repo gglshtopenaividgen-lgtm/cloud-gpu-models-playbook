@@ -24,7 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-BRAIN_ROOT = Path(r"<BRAIN_ROOT>")
+BRAIN_ROOT = Path(r"./")
 IDEAS_FILE = BRAIN_ROOT / "ideas.md"
 MISTAKES_FILE = BRAIN_ROOT / "mistakes.md"
 TEMP_READ = BRAIN_ROOT / "temp_read"
@@ -322,6 +322,144 @@ class CognitiveOrchestrator:
         content += f"\n---\n\n## 3. Final Architecture & Decision Lock\n\n"
         content += f"{bp.actionable_architecture}\n"
         path.write_text(content, encoding="utf-8")
+
+
+def run_adversarial_council(
+    topic_or_prompt: str,
+    mode: str = "plan",
+    files: Optional[List[str]] = None,
+    project_root: Optional[Path] = None,
+    rounds: int = 2,
+    dry_run: bool = False,
+    out_path: Optional[Path] = None,
+    profile: Optional[str] = None,
+    consult_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Split-Brain Adversarial Review Council (bounded <= 2 rounds).
+
+    Adapts addyosmani/adverse + zscole/adversarial-spec + obra/superpowers:
+    - Role 1: Architect (AI Studio Playground gemini-4-argon, architect.md, Search OFF)
+    - Role 2: Falsifier Blind (AI Studio Playground gemini-4-neon, falsifier_blind.md, --blind slice, Search OFF)
+    - Role 3: Plan Verifier (AI Studio Playground gemini-4-argon, plan_verifier.md, Search OFF)
+    - Role 4 (mode=='full'): Grounded Researcher (Gemini Web 4 Neon High Task)
+    """
+    mode_norm = (mode or "plan").strip().lower()
+    if mode_norm not in ("plan", "diff", "full"):
+        mode_norm = "plan"
+    bounded_rounds = max(1, min(2, int(rounds or 2)))
+
+    proj = Path(project_root).resolve() if project_root else BRAIN_ROOT
+    temp_dir = proj / "temp_read"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time())
+    report_path = Path(out_path) if out_path else (temp_dir / f"council_{mode_norm}_{ts}.md")
+
+    full_sync_scripts = BRAIN_ROOT / ".agents" / "skills" / "full-sync" / "scripts"
+    if str(full_sync_scripts) not in sys.path:
+        sys.path.insert(0, str(full_sync_scripts))
+    import offload_context_compiler as occ
+    import conversation_distiller as cd
+
+    # Build scrubbed offload context + full & blind slices
+    offload_path, off_stats = occ.compile_offload_context(proj, full=False, dry_run=dry_run)
+    blind_slice = cd.build_clean_conversation_slice(proj, max_turns=15, blind=True, out_path=temp_dir / "clean_conversation_slice_blind.md")
+    full_slice = cd.build_clean_conversation_slice(proj, max_turns=15, blind=False, out_path=temp_dir / "clean_conversation_slice.md")
+
+    base_files = [str(f) for f in (files or []) if Path(f).exists()]
+    if not dry_run and offload_path.exists():
+        base_files.append(str(offload_path))
+
+    arch_files = base_files + ([full_slice["output_path"]] if Path(full_slice["output_path"]).exists() else [])
+    blind_files = base_files + ([blind_slice["output_path"]] if Path(blind_slice["output_path"]).exists() else [])
+
+    council_plan = [
+        {"role": "Architect", "surface": "aistudio", "model": "gemini-4-argon", "system_skill": "architect", "search": False, "files": arch_files},
+        {"role": "Falsifier (Blind)", "surface": "aistudio", "model": "gemini-4-neon", "system_skill": "falsifier_blind", "search": False, "files": blind_files, "blind": True},
+        {"role": "Plan Verifier", "surface": "aistudio", "model": "gemini-4-argon", "system_skill": "plan_verifier", "search": False, "files": arch_files},
+    ]
+    if mode_norm == "full":
+        council_plan.append(
+            {"role": "Grounded Researcher", "surface": "web", "model": "4 Neon", "mode": "task", "thinking": "High", "system_skill": "grounded_researcher", "search": True, "files": base_files}
+        )
+
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "council_mode": mode_norm,
+            "rounds": bounded_rounds,
+            "roles": council_plan,
+            "report_path": str(report_path),
+            "offload_stats": off_stats,
+            "blind_slice_redactions": blind_slice.get("redaction_count", 0),
+        }
+
+    if consult_fn is None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import consult_argon
+        consult_fn = consult_argon.run_single_consultation
+
+    transcript_sections: List[str] = [
+        f"# Split-Brain Adversarial Review Council (`{mode_norm.upper()}` | max_rounds={bounded_rounds})",
+        f"- **Topic**: {topic_or_prompt}",
+        f"- **Project**: `{proj.name}`",
+        "",
+    ]
+
+    prior_findings = ""
+    unresolved_blockers: List[str] = []
+    for rnd in range(1, bounded_rounds + 1):
+        transcript_sections.append(f"## Round {rnd}")
+        round_blockers = []
+        for spec in council_plan:
+            role_prompt = (
+                f"[COUNCIL ROUND {rnd}/{bounded_rounds} | ROLE: {spec['role']} | MODE: {mode_norm}]\n\n"
+                f"Objective:\n{topic_or_prompt}\n"
+            )
+            if prior_findings and not spec.get("blind"):
+                role_prompt += f"\n### Prior Critique / Findings to Resolve or Verify:\n{prior_findings[:6000]}\n"
+            elif prior_findings and spec.get("blind") and rnd > 1:
+                role_prompt += f"\n### Revised Proposal Claims to Re-Attack:\n{prior_findings[:4000]}\n"
+
+            res = consult_fn(
+                prompt=role_prompt,
+                surface=spec["surface"],
+                model=spec["model"],
+                mode=spec.get("mode", "chat"),
+                thinking=spec.get("thinking", "High"),
+                files=spec["files"],
+                system_skill=spec["system_skill"],
+                search=spec["search"],
+                profile=profile,
+                auto_clean=True,
+            )
+            txt = (res.get("response") or res.get("text") or res.get("error") or "").strip()
+            transcript_sections.append(f"### {spec['role']} (`{spec['surface']}:{spec['model']}`)\n\n{txt}\n")
+            prior_findings += f"\n[{spec['role']} R{rnd}]:\n{txt[:2500]}\n"
+            if "VERDICT: REJECT" in txt or "BLOCKER" in txt or "AUDIT_STATUS: BLOCKED" in txt:
+                round_blockers.append(f"Round {rnd} - {spec['role']}")
+
+        unresolved_blockers = round_blockers
+        if not round_blockers:
+            transcript_sections.append(f"_Converged cleanly at Round {rnd} with zero remaining BLOCKERS._")
+            break
+
+    final_verdict = "VERIFIED" if not unresolved_blockers else "UNRESOLVED_RISKS"
+    transcript_sections.append(f"## Final Council Verdict: `{final_verdict}`")
+    if unresolved_blockers:
+        transcript_sections.append("Open flags raised by: " + ", ".join(unresolved_blockers))
+
+    report_md = "\n\n".join(transcript_sections).strip() + "\n"
+    report_path.write_text(report_md, encoding="utf-8")
+    return {
+        "ok": True,
+        "council_mode": mode_norm,
+        "verdict": final_verdict,
+        "unresolved_blockers": unresolved_blockers,
+        "rounds_executed": min(bounded_rounds, rnd),
+        "report_path": str(report_path),
+        "response": report_md,
+    }
 
 
 def main():

@@ -40,6 +40,77 @@ try:
 except ImportError:
     profile_lock_manager = None
 
+try:
+    import popup_healer
+except ImportError:
+    popup_healer = None
+
+GEMINI_SKILLS_DIR = Path(__file__).resolve().parents[2].parent / "gemini_skills"
+ALLOWED_AISTUDIO_MODELS = {
+    "argon": "gemini-4-argon",
+    "gemini-4-argon": "gemini-4-argon",
+    "4 argon": "gemini-4-argon",
+    "neon": "gemini-4-neon",
+    "gemini-4-neon": "gemini-4-neon",
+    "4 neon": "gemini-4-neon",
+}
+BLOCKED_AISTUDIO_MODELS = ("hydrogen", "carbon")
+
+
+def validate_aistudio_model(model_name: Optional[str]) -> str:
+    """Enforces AI Studio model whitelist (gemini-4-argon / gemini-4-neon); hard-blocks Hydrogen & Carbon."""
+    raw = (model_name or "gemini-4-argon").strip().lower()
+    if any(b in raw for b in BLOCKED_AISTUDIO_MODELS):
+        raise ValueError(
+            f"Model '{model_name}' is blocked in browser bridges. "
+            "Use 'gemini-4-argon' or 'gemini-4-neon' in AI Studio Playground."
+        )
+    if raw in ALLOWED_AISTUDIO_MODELS:
+        return ALLOWED_AISTUDIO_MODELS[raw]
+    if "argon" in raw:
+        return "gemini-4-argon"
+    if "neon" in raw:
+        return "gemini-4-neon"
+    raise ValueError(
+        f"Unsupported AI Studio model '{model_name}'. Allowed Playground models: gemini-4-argon, gemini-4-neon."
+    )
+
+
+def resolve_system_skill(system_skill: Optional[str]) -> str:
+    """Loads reusable AI Studio system instructions from brain/.agents/gemini_skills/<name>.md or explicit file path."""
+    if not system_skill:
+        return ""
+    cand = Path(system_skill)
+    if cand.is_file():
+        return cand.read_text(encoding="utf-8", errors="replace").strip()
+    slug = system_skill.strip().removesuffix(".md")
+    skill_file = GEMINI_SKILLS_DIR / f"{slug}.md"
+    if skill_file.is_file():
+        return skill_file.read_text(encoding="utf-8", errors="replace").strip()
+    raise FileNotFoundError(f"System skill not found: {system_skill} (checked {skill_file})")
+
+
+def _scrub_for_cloud(text: str) -> str:
+    """Best-effort 2-layer secret redaction before uploading text/bundles to AI Studio."""
+    compiler_dir = Path(__file__).resolve().parents[2] / "full-sync" / "scripts"
+    if str(compiler_dir) not in sys.path:
+        sys.path.insert(0, str(compiler_dir))
+    try:
+        import offload_context_compiler
+        scrubbed, _ = offload_context_compiler.redact_two_layer(text)
+        return scrubbed
+    except Exception:
+        # Built-in fallback regex redaction before Wave 2 compiler exists
+        text = re.sub(r"sk-[a-zA-Z0-9_\-]{20,}", "[REDACTED_API_KEY]", text)
+        text = re.sub(r"AIza[0-9A-Za-z\-_]{35}", "[REDACTED_API_KEY]", text)
+        text = re.sub(r"(?i)\bbearer\s+[a-zA-Z0-9_\-\.]{20,}", "Bearer [REDACTED_TOKEN]", text)
+        text = re.sub(
+            r'(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*["\']?[^"\'\s\n]{6,}["\']?',
+            r"\1: [REDACTED]",
+            text,
+        )
+        return text
+
 
 def call_bridge_api(
     endpoint: str,
@@ -47,7 +118,7 @@ def call_bridge_api(
     payload: Optional[Dict[str, Any]] = None,
     timeout: float = 30.0,
 ) -> Dict[str, Any]:
-    """Helper to query local bridge daemon."""
+    """Helper to query local bridge daemon (preserves structured JSON on HTTP 4xx/5xx)."""
     url = f"{BRIDGE_URL}{endpoint}"
     data = json.dumps(payload).encode("utf-8") if payload else None
     headers = {"Content-Type": "application/json"} if payload else {}
@@ -56,6 +127,15 @@ def call_bridge_api(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             return json.loads(res.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            parsed = json.loads(e.read().decode("utf-8"))
+            if isinstance(parsed, dict):
+                parsed.setdefault("http_status", e.code)
+                return parsed
+        except Exception:
+            pass
+        return {"ok": False, "http_status": e.code, "error": f"HTTP {e.code}: {e.reason}"}
     except urllib.error.URLError as e:
         raise ConnectionError(
             f"Cannot connect to Argon Bridge on {BRIDGE_URL}. Is server.py running? ({e})"
@@ -88,12 +168,13 @@ def bundle_context_files(file_paths: List[str]) -> Tuple[str, int]:
 
 
 class HeartbeatThread(threading.Thread):
-    """Background thread that automatically renews the profile lease every 25 seconds."""
+    """Background thread that automatically renews the surface-scoped profile lease every 25 seconds."""
 
-    def __init__(self, profile_name: str, agent_id: str, interval_sec: float = 25.0):
+    def __init__(self, profile_name: str, agent_id: str, surface: str = "aistudio", interval_sec: float = 25.0):
         super().__init__(daemon=True)
         self.profile_name = profile_name
         self.agent_id = agent_id
+        self.surface = surface
         self.interval_sec = interval_sec
         self.stop_event = threading.Event()
 
@@ -102,12 +183,10 @@ class HeartbeatThread(threading.Thread):
             if self.stop_event.wait(self.interval_sec):
                 break
             try:
-                call_bridge_api(
-                    "/lock/renew",
-                    method="POST",
-                    payload={"profile": self.profile_name, "holder": self.agent_id, "ttl": 300.0},
-                    timeout=5.0,
-                )
+                if profile_lock_manager:
+                    profile_lock_manager.renew_profile_lease(
+                        self.profile_name, agent_id=self.agent_id, extend_seconds=180.0, surface=self.surface
+                    )
             except Exception:
                 pass
 
@@ -177,13 +256,14 @@ window.__agyStudio = {
             }
         }
         
-        // 4. Dismiss generic dialogs and backdrops
+        // 4. Dismiss strictly safe promo / announcement dialogs (NEVER click consent/Drive/upgrade)
+        const safeVerbs = new Set(['close', 'dismiss', 'got it', 'not now', 'no thanks', 'skip', 'ok', 'maybe later', '×', 'x']);
         const dialogButtons = Array.from(document.querySelectorAll(
-            'mat-dialog-container button, [role="dialog"] button, .cdk-overlay-container button'
+            'mat-dialog-container button, [role="dialog"] button'
         ));
         for (const btn of dialogButtons) {
-            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase().trim();
-            if (['get started', 'i agree', 'accept', 'got it', 'close', 'dismiss'].includes(text)) {
+            const text = (btn.getAttribute('aria-label') || btn.innerText || '').toLowerCase().trim();
+            if (safeVerbs.has(text)) {
                 btn.click();
                 logs.push("Dismissed dialog button: " + text);
                 await this.sleep(200);
@@ -191,6 +271,93 @@ window.__agyStudio = {
         }
         
         return { ok: true, logs: logs };
+    },
+
+    assertActiveModel: function(expectedModel) {
+        const expClean = (expectedModel || 'gemini-4-argon').toLowerCase();
+        const card = document.querySelector('.model-selector-card, [data-test-id="model-selector-button"]');
+        const raw = card ? (card.innerText || card.getAttribute('aria-label') || '').trim() : '';
+        const low = raw.toLowerCase();
+        if (low.includes('hydrogen') || low.includes('carbon')) {
+            return { ok: false, blocked: true, actual: raw, error: 'Model card loaded blocked model: ' + raw };
+        }
+        const wantWord = expClean.includes('neon') ? 'neon' : 'argon';
+        return { ok: low.includes(wantWord), actual: raw, expected: expectedModel };
+    },
+
+    configureRunSettings: async function(opts) {
+        const cfg = opts || {};
+        const report = { ok: true, applied: {} };
+
+        // 1. Thinking Level (High / Medium / Low)
+        if (cfg.thinking) {
+            const want = String(cfg.thinking).trim().toLowerCase();
+            const sel = document.querySelector('mat-select[aria-label="Thinking Level"], mat-select[aria-label*="Thinking" i]');
+            if (sel) {
+                const cur = (sel.innerText || '').trim().toLowerCase();
+                if (!cur.includes(want)) {
+                    sel.click();
+                    await this.sleep(350);
+                    const options = Array.from(document.querySelectorAll('.cdk-overlay-container mat-option, [role="option"]'));
+                    const match = options.find(o => (o.innerText || '').trim().toLowerCase().includes(want));
+                    if (match) {
+                        match.click();
+                        await this.sleep(250);
+                        report.applied.thinking = (match.innerText || '').trim();
+                    } else {
+                        const bd = document.querySelector('.cdk-overlay-backdrop');
+                        if (bd) bd.click();
+                        report.applied.thinking_warning = 'Option not found: ' + cfg.thinking;
+                    }
+                } else {
+                    report.applied.thinking = cur + ' (already)';
+                }
+            }
+        }
+
+        // 2. Tools switches (Grounding Search, Code execution, URL context)
+        const switchTargets = [
+            ['search', 'Grounding with Google Search', cfg.search],
+            ['code_exec', 'Code execution', cfg.codeExec],
+            ['url_context', 'Browse the url context', cfg.urlContext],
+        ];
+        for (const [key, ariaLabel, desired] of switchTargets) {
+            if (typeof desired !== 'boolean') continue;
+            const sw = document.querySelector(`button[role="switch"][aria-label="${ariaLabel}"]`)
+                || document.querySelector(`button[role="switch"][aria-label*="${ariaLabel.split(' ')[0]}" i]`);
+            if (sw) {
+                const curChecked = sw.getAttribute('aria-checked') === 'true';
+                if (curChecked !== desired) {
+                    sw.click();
+                    await this.sleep(200);
+                }
+                report.applied[key] = sw.getAttribute('aria-checked') === 'true';
+            }
+        }
+
+        // 3. Max output tokens (expand Advanced settings first if needed)
+        if (cfg.maxOutputTokens) {
+            const clamped = Math.max(1, Math.min(1048576, Number(cfg.maxOutputTokens) || 800000));
+            const advBtn = document.querySelector('button[aria-label="Expand or collapse advanced settings"]');
+            let tokInput = document.querySelector('input[type="number"][aria-label="Maximum output tokens"]');
+            if ((!tokInput || tokInput.offsetWidth === 0) && advBtn) {
+                advBtn.click();
+                await this.sleep(350);
+                tokInput = document.querySelector('input[type="number"][aria-label="Maximum output tokens"]');
+            }
+            if (tokInput) {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                tokInput.focus();
+                setter.call(tokInput, String(clamped));
+                tokInput.dispatchEvent(new Event('input', { bubbles: true }));
+                tokInput.dispatchEvent(new Event('change', { bubbles: true }));
+                tokInput.blur();
+                await this.sleep(150);
+                report.applied.max_output_tokens = Number(tokInput.value);
+            }
+        }
+
+        return report;
     },
     
     selectModel: async function(targetModelName) {
@@ -258,62 +425,110 @@ window.__agyStudio = {
     
     setSystemInstructions: async function(systemText) {
         if (!systemText) return { ok: true, skipped: true };
-        
-        const sysCard = document.querySelector('.system-instructions-card, button[aria-label*="System instructions" i]');
-        if (sysCard) {
-            sysCard.click();
-            await this.sleep(300);
-        }
-        
-        let sysBox = document.querySelector(
-            'textarea[placeholder*="System instructions" i], [aria-label*="System instructions" i] textarea, .system-instructions-textarea'
+
+        const findSysBox = () => (
+            document.querySelector('textarea[aria-label*="System instructions" i]') ||
+            document.querySelector('textarea[placeholder*="System instructions" i]') ||
+            document.querySelector('[aria-label*="System instructions" i] textarea') ||
+            document.querySelector('.system-instructions-textarea')
         );
-        
+
+        let sysBox = findSysBox();
+        if (!sysBox) {
+            const sysCard = document.querySelector('.system-instructions-card, button[aria-label*="System instructions" i]');
+            if (sysCard) {
+                sysCard.click();
+                for (let i = 0; i < 15; i++) {
+                    await this.sleep(150);
+                    sysBox = findSysBox();
+                    if (sysBox) break;
+                }
+            }
+        }
+
         if (!sysBox) return { ok: false, error: "System instructions textarea not found" };
-        
+
         sysBox.focus();
-        sysBox.value = systemText;
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (nativeSetter) {
+            nativeSetter.call(sysBox, systemText);
+        } else {
+            sysBox.value = systemText;
+        }
         sysBox.dispatchEvent(new Event('input', { bubbles: true }));
         sysBox.dispatchEvent(new Event('change', { bubbles: true }));
-        
-        // Close modal if there's a done/close button
-        const doneBtn = Array.from(document.querySelectorAll('button')).find(b => 
-            (b.innerText || '').trim() === 'Done' || (b.innerText || '').trim() === 'Save'
-        );
+        await this.sleep(200);
+
+        // Close modal ONLY if there is an explicit Done/Save/Close button inside a dialog or system instructions drawer
+        const doneBtn = Array.from(document.querySelectorAll('mat-dialog-container button, .system-instructions-drawer button')).find(b => {
+            const t = (b.innerText || '').trim().toLowerCase();
+            const a = (b.getAttribute('aria-label') || '').toLowerCase();
+            return t === 'done' || t === 'save' || a.includes('close system');
+        });
         if (doneBtn) {
             doneBtn.click();
             await this.sleep(200);
         }
-        return { ok: true, message: "System instructions injected" };
+        return { ok: true, message: "System instructions injected", chars: (sysBox.value || '').length };
     },
-    
+
     injectPrompt: async function(promptText) {
-        const ta = document.querySelector(
-            'textarea[aria-label*="Enter a prompt" i], .cdk-textarea-autosize.textarea, textarea[placeholder*="Start typing" i], textarea'
-        );
+        const orderedSelectors = [
+            'textarea[aria-label*="Enter a prompt" i]',
+            'textarea[placeholder*="Start typing" i]',
+            'ms-prompt-input-wrapper textarea'
+        ];
+        let ta = null;
+        for (const sel of orderedSelectors) {
+            const candidate = document.querySelector(sel);
+            if (candidate && candidate.offsetParent !== null) {
+                ta = candidate;
+                break;
+            }
+        }
+        if (!ta) {
+            ta = Array.from(document.querySelectorAll('textarea')).find(t => {
+                if (t.offsetParent === null) return false;
+                const aria = (t.getAttribute('aria-label') || '').toLowerCase();
+                const ph = (t.getAttribute('placeholder') || '').toLowerCase();
+                return !aria.includes('system') && !ph.includes('system');
+            }) || null;
+        }
         if (!ta) return { ok: false, error: "Prompt textarea not found" };
-        
+
         ta.focus();
-        ta.value = promptText;
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+        if (nativeSetter) {
+            nativeSetter.call(ta, promptText);
+        } else {
+            ta.value = promptText;
+        }
         ta.dispatchEvent(new Event('input', { bubbles: true }));
         ta.dispatchEvent(new Event('change', { bubbles: true }));
         await this.sleep(300);
-        return { ok: true, message: "Prompt injected successfully" };
+        return { ok: true, message: "Prompt injected successfully", targetAria: ta.getAttribute('aria-label') || '', chars: (ta.value || '').length };
     },
-    
+
     clickRun: async function() {
-        const runBtn = document.querySelector(
-            'button.ctrl-enter-submits, button[aria-label*="Run" i]'
-        ) || Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('Run'));
-        
+        const runBtn = document.querySelector('button.ctrl-enter-submits') ||
+            Array.from(document.querySelectorAll('button')).find(b => {
+                if (b.offsetParent === null) return false;
+                const txt = (b.innerText || '').trim().toLowerCase();
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                if (aria.includes('settings') || txt.includes('settings')) return false;
+                return aria === 'run' || aria.includes('run prompt') || txt.startsWith('run');
+            });
+
         if (runBtn && !runBtn.disabled) {
             runBtn.click();
             return { ok: true, method: "button_click" };
         }
-        
-        // Fallback: Dispatch Ctrl+Enter on prompt textarea
-        const ta = document.querySelector('textarea');
+
+        // Fallback: Dispatch Ctrl+Enter on actual prompt textarea (never system instructions)
+        const ta = document.querySelector('textarea[aria-label*="Enter a prompt" i]') ||
+            document.querySelector('textarea[placeholder*="Start typing" i]');
         if (ta) {
+            ta.focus();
             ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', ctrlKey: true, bubbles: true }));
             return { ok: true, method: "ctrl_enter" };
         }
@@ -339,74 +554,243 @@ window.__agyStudio = {
         return { ok: true, turns: document.querySelectorAll('ms-chat-turn').length };
     },
     
-    getGenerationStatus: function() {
-        const runBtn = document.querySelector('button.ctrl-enter-submits') || Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('Run'));
-        const runBtnText = runBtn ? (runBtn.innerText || '').trim() : '';
-        const isStopVisible = runBtnText.toLowerCase().includes('stop') || !!document.querySelector('button[aria-label*="Cancel" i], button[aria-label*="Stop" i], button.cancel-button');
-        
+    _extractAnswerText: function(turn) {
+        if (!turn) return "";
+
+        const chunks = Array.from(turn.querySelectorAll('ms-text-chunk')).filter(
+            el => !el.closest('ms-thought-chunk, .thought-container, .thought-activity-host, mat-expansion-panel')
+        );
+        const chunkTexts = chunks
+            .map(el => (el.innerText || el.textContent || '').trim())
+            .filter(Boolean);
+        if (chunkTexts.length > 0) {
+            return chunkTexts.join('\n').trim();
+        }
+
+        const cmarkNodes = Array.from(turn.querySelectorAll('ms-cmark-node')).filter(el => {
+            if (el.closest('ms-thought-chunk, .thought-container, .thought-activity-host, mat-expansion-panel')) return false;
+            const parentCmark = el.parentElement ? el.parentElement.closest('ms-cmark-node') : null;
+            return !parentCmark;
+        });
+        const cmarkTexts = cmarkNodes
+            .map(el => (el.innerText || el.textContent || '').trim())
+            .filter(Boolean);
+        if (cmarkTexts.length > 0) {
+            return cmarkTexts.join('\n').trim();
+        }
+
+        const clone = turn.cloneNode(true);
+        Array.from(clone.querySelectorAll(
+            'ms-thought-chunk, .thought-container, mat-expansion-panel, button, mat-icon, .actions, .actions-container, .thumb-container, .turn-footer, .role-label'
+        )).forEach(el => el.remove());
+        let txt = (clone.innerText || clone.textContent || '').trim();
+        txt = txt.replace(/^edit\s*more_vert\s*/i, '');
+        txt = txt.replace(/^Model\s*/i, '');
+        txt = txt.replace(/\s*\d+(\.\d+)?s\s*$/i, '');
+        return txt.trim();
+    },
+
+    _isVisibleEnabled: function(el) {
+        if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+        if (el.offsetParent === null) return false;
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+    },
+
+    _isExcludedStopCandidate: function(el) {
+        if (!el) return true;
+        if (el.closest('.right-panel, .run-settings-panel, ms-run-settings, mat-dialog-container, [role="dialog"], .cdk-overlay-container')) {
+            return true;
+        }
+        const combined = ((el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '')).toLowerCase();
+        return /settings|stop sequence|close|dismiss|clear|delete|remove|feedback/.test(combined);
+    },
+
+    _isStopControlVisible: function() {
+        const runBtn = document.querySelector('button.ctrl-enter-submits') || Array.from(document.querySelectorAll('button')).find(b => {
+            if (!this._isVisibleEnabled(b) || this._isExcludedStopCandidate(b)) return false;
+            const txt = (b.innerText || '').trim().toLowerCase();
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return txt.startsWith('run') || txt.startsWith('stop') || aria === 'run' || aria.startsWith('stop');
+        });
+        if (runBtn && this._isVisibleEnabled(runBtn) && !this._isExcludedStopCandidate(runBtn)) {
+            const runBtnText = ((runBtn.innerText || '') + ' ' + (runBtn.getAttribute('aria-label') || '')).toLowerCase();
+            if (/\bstop\b|\bcancel\b/.test(runBtnText)) {
+                return true;
+            }
+        }
+        const stopCandidates = Array.from(document.querySelectorAll(
+            'button[aria-label*="Cancel" i], button[aria-label*="Stop" i], button.cancel-button, button.stop-button'
+        ));
+        return stopCandidates.some(btn => {
+            if (!this._isVisibleEnabled(btn) || this._isExcludedStopCandidate(btn)) return false;
+            const combined = ((btn.innerText || '') + ' ' + (btn.getAttribute('aria-label') || '')).toLowerCase();
+            return /\bstop\b|\bcancel\b/.test(combined);
+        });
+    },
+
+    _detectErrorBanner: function() {
+        const errRe = /(quota exceeded|rate limit|internal error|something went wrong|permission denied|resource has been exhausted|model is overloaded|too many requests|err_internet_disconnected|network error|failed to fetch|connection lost|429)/i;
+        const transientRe = /(err_internet_disconnected|network error|failed to fetch|connection lost|something went wrong|internal error)/i;
+
+        // Check browser offline / Chrome network error page
+        const bodyHead = ((document.body && document.body.innerText) || '').slice(0, 1200);
+        if (/ERR_INTERNET_DISCONNECTED|No internet|This site can.?t be reached/i.test(bodyHead)) {
+            return { text: bodyHead.split('\n')[0].trim() || 'ERR_INTERNET_DISCONNECTED', transient: true };
+        }
+
+        const nodes = Array.from(document.querySelectorAll(
+            'mat-snack-bar-container, .mat-mdc-snack-bar-label, .error-banner, .error-message, [role="alert"], ms-error-banner, .turn-error, .error-state, ms-chat-turn .error'
+        ));
+        for (const el of nodes) {
+            if (el.offsetParent === null) continue;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            if (r.width <= 0 || r.height <= 0 || s.visibility === 'hidden' || s.display === 'none') continue;
+            const txt = (el.innerText || el.textContent || '').trim();
+            if (!txt) continue;
+            if (errRe.test(txt)) {
+                return { text: txt.slice(0, 400), transient: transientRe.test(txt) };
+            }
+        }
+        return null;
+    },
+
+    _collectAnswerTurns: function() {
         const turns = Array.from(document.querySelectorAll('ms-chat-turn'));
-        const answerTurns = turns.filter(t => t.querySelector('.model') && !t.classList.contains('thought-activity-host'));
-        const activeAnswerTurn = answerTurns.length > 0 ? answerTurns[answerTurns.length - 1] : null;
-        const textChunk = activeAnswerTurn ? activeAnswerTurn.querySelector('ms-text-chunk') : null;
-        const curText = textChunk ? (textChunk.innerText || '').trim() : (activeAnswerTurn ? (activeAnswerTurn.innerText || '').trim() : '');
-        
+        return turns.filter(t => (
+            (t.querySelector('.model') || t.getAttribute('data-turn-role') === 'Model' || t.classList.contains('model-turn'))
+            && !t.classList.contains('thought-activity-host')
+        ));
+    },
+
+    _extractMultiTurnAnswer: function(answerTurns, baselineTurns) {
+        const startIdx = Math.max(0, Number(baselineTurns) || 0);
+        const targetTurns = answerTurns.slice(startIdx);
+        const parts = targetTurns
+            .map(t => this._extractAnswerText(t))
+            .filter(txt => txt && txt.trim().length > 0);
+        return {
+            turns: targetTurns,
+            text: parts.join('\n\n').trim()
+        };
+    },
+
+    _turnHasFeedbackButtons: function(turn) {
+        const controls = Array.from(turn?.querySelectorAll('button, [role="button"]') || []);
+        const labels = controls.filter(control => this._isVisibleEnabled(control)).map(control =>
+            [control.getAttribute('aria-label'), control.getAttribute('title'),
+                control.getAttribute('mattooltip'), control.textContent].join(' ').toLowerCase());
+        return labels.some(label => /thumb[_ -]?up|good response|helpful response|👍/.test(label)) &&
+            labels.some(label => /thumb[_ -]?down|bad response|not helpful|👎/.test(label));
+    },
+
+    rerunCurrentPrompt: function(baselineTurns) {
+        const dismiss = Array.from(document.querySelectorAll('mat-snack-bar-container button, [role="alert"] button'))
+            .find(button => this._isVisibleEnabled(button));
+        if (dismiss) dismiss.click();
+        const answerTurns = this._collectAnswerTurns().slice(baselineTurns);
+        const latest = answerTurns.at(-1);
+        const controls = latest ? latest.querySelectorAll('button') : [];
+        const rerun = Array.from(controls).find(button => {
+            const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.innerText].join(' ');
+            return this._isVisibleEnabled(button) && /\brerun\b|\bre-run\b|\bretry\b/.test(label.toLowerCase());
+        });
+        if (!rerun) return this.clickRun();
+        rerun.click();
+        return {ok: true, method: 'rerun_btn'};
+    },
+
+    getGenerationStatus: function(baselineTurns) {
+        const isStopVisible = this._isStopControlVisible();
+        const turns = Array.from(document.querySelectorAll('ms-chat-turn'));
+        const answerTurns = this._collectAnswerTurns();
+        const base = Math.max(0, Number(baselineTurns) || 0);
+        const extracted = this._extractMultiTurnAnswer(answerTurns, base);
+        const curText = extracted.text;
+
         const thoughtTurns = turns.filter(t => t.classList.contains('thought-activity-host'));
-        
+        let thoughtChars = 0;
+        for (const tt of thoughtTurns) {
+            thoughtChars += ((tt.innerText || tt.textContent || '').trim()).length;
+        }
+        for (const at of extracted.turns) {
+            const tn = at.querySelector('ms-thought-chunk, .thought-container, mat-expansion-panel');
+            if (tn) thoughtChars += ((tn.innerText || tn.textContent || '').trim()).length;
+        }
+
+        const errObj = this._detectErrorBanner();
         const headerText = (document.querySelector('.app-header, header, .top-bar') || document.body).innerText || '';
-        const tokenMatch = headerText.match(/([0-9,]+\s*tokens?)/i);
+        const tokenMatch = headerText.match(/(\d[\d,]*\s*tokens?)/i);
         const tokenTelemetry = tokenMatch ? tokenMatch[1] : null;
-        
+
         return {
             is_generating: isStopVisible,
             answer_turns_count: answerTurns.length,
             thought_turns_count: thoughtTurns.length,
+            thought_chars: thoughtChars,
             total_turns_count: turns.length,
             text_length: curText.length,
-            has_answer: !!textChunk && curText.length > 0,
+            has_feedback_buttons: this._turnHasFeedbackButtons(extracted.turns.at(-1)),
+            has_answer: extracted.turns.length > 0 && curText.length > 0,
+            error_banner: errObj ? errObj.text : null,
+            is_transient_network_error: Boolean(errObj && errObj.transient),
             token_telemetry: tokenTelemetry
         };
     },
-    
-    harvestRichContent: function() {
+
+    harvestRichContent: function(baselineTurns) {
         const turns = Array.from(document.querySelectorAll('ms-chat-turn'));
-        const answerTurns = turns.filter(t => t.querySelector('.model') && !t.classList.contains('thought-activity-host'));
-        const target = answerTurns.length > 0 ? answerTurns[answerTurns.length - 1] : null;
-        
-        // Extract thoughts if any
-        const thoughtTurns = turns.filter(t => t.classList.contains('thought-activity-host'));
-        let thoughtText = "";
-        if (thoughtTurns.length > 0) {
-            const tClone = thoughtTurns[thoughtTurns.length - 1].cloneNode(true);
-            Array.from(tClone.querySelectorAll('button, mat-icon, .actions')).forEach(el => el.remove());
-            thoughtText = (tClone.innerText || '').trim();
+        const answerTurns = this._collectAnswerTurns();
+        const base = Math.max(0, Number(baselineTurns) || 0);
+        const extracted = this._extractMultiTurnAnswer(answerTurns, base);
+        let targetTurns = extracted.turns;
+        if (targetTurns.length === 0 && answerTurns.length > 0) {
+            targetTurns = [answerTurns[answerTurns.length - 1]];
         }
-        
-        // Extract answer text from ms-text-chunk or clone
-        let fullText = "";
-        if (target) {
-            const textChunk = target.querySelector('ms-text-chunk');
-            if (textChunk) {
-                fullText = (textChunk.innerText || '').trim();
-            } else {
-                const clone = target.cloneNode(true);
-                Array.from(clone.querySelectorAll('button, mat-icon, .actions, .actions-container, .thumb-container')).forEach(el => el.remove());
-                fullText = (clone.innerText || '').trim();
-                fullText = fullText.replace(/^edit\s*more_vert\s*/i, '');
-                fullText = fullText.replace(/\s*\d+(\.\d+)?s\s*$/i, '');
+
+        // Extract thoughts across all new thought turns or embedded thought chunks
+        const thoughtTurns = turns.filter(t => t.classList.contains('thought-activity-host'));
+        const thoughtParts = [];
+        if (thoughtTurns.length > 0) {
+            for (const tt of thoughtTurns.slice(-3)) {
+                const tClone = tt.cloneNode(true);
+                Array.from(tClone.querySelectorAll('button, mat-icon, .actions')).forEach(el => el.remove());
+                const tTxt = (tClone.innerText || tClone.textContent || '').trim();
+                if (tTxt) thoughtParts.push(tTxt);
             }
         }
-        
-        // 2. Code Blocks
+        if (thoughtParts.length === 0) {
+            for (const t of targetTurns) {
+                const thoughtNode = t.querySelector('ms-thought-chunk, .thought-container, mat-expansion-panel');
+                if (thoughtNode) {
+                    const tTxt = (thoughtNode.innerText || thoughtNode.textContent || '').trim();
+                    if (tTxt) thoughtParts.push(tTxt);
+                }
+            }
+        }
+        const thoughtText = thoughtParts.join('\n\n').trim();
+
+        // Extract complete multi-turn answer text
+        const fullText = targetTurns
+            .map(t => this._extractAnswerText(t))
+            .filter(Boolean)
+            .join('\n\n')
+            .trim();
+
+        // 2. Code Blocks across all target turns
         const codeBlocks = [];
-        if (target) {
+        const seenCode = new Set();
+        for (const target of targetTurns) {
             const codeContainers = Array.from(target.querySelectorAll('pre, code-block, .code-container'));
-            const seenCode = new Set();
             for (const c of codeContainers) {
+                if (c.closest('ms-thought-chunk, .thought-container, mat-expansion-panel')) continue;
                 const codeEl = c.querySelector('code') || c;
                 const codeText = (codeEl.innerText || '').trim();
                 if (!codeText || seenCode.has(codeText)) continue;
                 seenCode.add(codeText);
-                
+
                 let lang = "code";
                 const langEl = c.querySelector('.header-text, [class*="language-"], .code-block-decoration');
                 if (langEl) {
@@ -419,12 +803,13 @@ window.__agyStudio = {
                 codeBlocks.push({ language: lang || "code", code: codeText });
             }
         }
-        
-        // 3. Tables
+
+        // 3. Tables across all target turns
         const tables = [];
-        if (target) {
+        for (const target of targetTurns) {
             const tableNodes = Array.from(target.querySelectorAll('table'));
             for (const tbl of tableNodes) {
+                if (tbl.closest('ms-thought-chunk, .thought-container, mat-expansion-panel')) continue;
                 const headers = Array.from(tbl.querySelectorAll('th')).map(th => th.innerText.trim());
                 const rows = [];
                 const trNodes = Array.from(tbl.querySelectorAll('tbody tr, tr')).filter(tr => tr.querySelectorAll('td').length > 0);
@@ -441,12 +826,12 @@ window.__agyStudio = {
                 tables.push({ headers, rows, markdown: mdTable });
             }
         }
-        
+
         // 4. Token telemetry
         const headerText = (document.querySelector('.app-header, header, .top-bar') || document.body).innerText || '';
-        const tokenMatch = headerText.match(/([0-9,]+\s*tokens?)/i);
+        const tokenMatch = headerText.match(/(\d[\d,]*\s*tokens?)/i);
         const tokenTelemetry = tokenMatch ? tokenMatch[1] : null;
-        
+
         return {
             ok: true,
             text: fullText.trim(),
@@ -489,146 +874,219 @@ window.__agyStudio = {
         if (closeBtn) closeBtn.click();
         
         return { ok: !!snippet, code: snippet, chars: snippet.length, tabs: tabs };
-    },
-    
-    searchShowcaseApps: async function(query) {
-        const input = document.querySelector('input');
-        if (input) {
-            input.focus();
-            input.value = query;
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            await this.sleep(1200);
-        }
-        const cards = Array.from(document.querySelectorAll('ms-showcase-card, .showcase-card, mat-card, .app-card, [class*="showcase-card"], ms-app-card, .grid > div, .card')).map(c => {
-            const lines = (c.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
-            return { title: lines[0] || 'Unknown', tags: lines.slice(1, 4), fullText: c.innerText };
-        }).filter(c => c.title !== 'Unknown');
-        return { ok: true, query: query, count: cards.length, apps: cards.slice(0, 20) };
-    },
-    
-    remixShowcaseApp: async function(appTitle, newName, newDesc) {
-        const cards = Array.from(document.querySelectorAll('ms-showcase-card, .showcase-card, mat-card, .app-card, [class*="showcase-card"], ms-app-card, .grid > div'));
-        const targetCard = cards.find(c => (c.innerText || '').toLowerCase().includes((appTitle || '').toLowerCase()));
-        if (!targetCard) return { ok: false, error: 'App card not found: ' + appTitle };
-        
-        const remixBtn = Array.from(targetCard.querySelectorAll('button, a')).find(b => (b.innerText || '').trim() === 'Remix');
-        if (!remixBtn) return { ok: false, error: 'Remix button not found on card' };
-        remixBtn.click();
-        await this.sleep(1000);
-        
-        const dialog = document.querySelector('mat-dialog-container');
-        if (dialog) {
-            if (newName) {
-                const nameInput = dialog.querySelector('input');
-                if (nameInput) {
-                    nameInput.focus();
-                    nameInput.value = newName;
-                    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-            }
-            if (newDesc) {
-                const descInput = dialog.querySelector('textarea');
-                if (descInput) {
-                    descInput.focus();
-                    descInput.value = newDesc;
-                    descInput.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-            }
-            const applyBtn = Array.from(dialog.querySelectorAll('button')).find(b => (b.innerText || '').trim() === 'Apply');
-            if (applyBtn) {
-                applyBtn.click();
-                return { ok: true, message: 'Remix applied successfully' };
-            }
-        }
-        return { ok: true, message: 'Remix initiated' };
-    },
-    
-    dispatchBuildApp: async function(description) {
-        const ta = document.querySelector('textarea.prompt-textarea, textarea[placeholder*="Describe an app" i], textarea');
-        if (!ta) return { ok: false, error: 'App prompt textarea not found' };
-        ta.focus();
-        ta.value = description;
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
-        ta.dispatchEvent(new Event('change', { bubbles: true }));
-        await this.sleep(300);
-        
-        const buildBtn = document.querySelector('button.build-button, button[aria-label*="Send" i]');
-        if (buildBtn) {
-            buildBtn.classList.remove('button-hidden');
-            buildBtn.click();
-            return { ok: true, method: 'build_button' };
-        }
-        ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-        return { ok: true, method: 'enter_key' };
-    },
-    
-    getAppBuilderStatus: async function() {
-        const isWorking = !!document.querySelector('.working, [aria-label*="Working" i], [aria-label*="Stop" i]') || 
-                          (document.body.innerText || '').includes('Running for') ||
-                          (document.body.innerText || '').includes('Generating app');
-        
-        const fileItems = Array.from(document.querySelectorAll('div, span, button, li, .file-tree-item, .file-item')).filter(el => {
-            const text = (el.innerText || '').trim();
-            return (text.endsWith('.json') || text.endsWith('.html') || text.endsWith('.css') || text.endsWith('.ts') || text.endsWith('.js')) && !text.includes('\n');
-        }).map(el => (el.innerText || '').trim());
-        
-        const titleEl = document.querySelector('.app-title, .title, header h1, header h2') || Array.from(document.querySelectorAll('button, div')).find(b => (b.className || '').includes('title'));
-        const appTitle = titleEl ? (titleEl.innerText || '').trim() : 'Untitled';
-        
-        return {
-            is_working: isWorking,
-            files: Array.from(new Set(fileItems)),
-            app_title: appTitle
-        };
-    },
-    
-    exportAppProject: async function(exportType = 'zip') {
-        const exportBtn = Array.from(document.querySelectorAll('button')).find(b => 
-            (b.innerText || '').toLowerCase().includes('export') || 
-            (b.getAttribute('aria-label') || '').toLowerCase().includes('export')
-        );
-        if (!exportBtn) return { ok: false, error: 'Export button not found' };
-        exportBtn.click();
-        await this.sleep(600);
-        
-        const menuItems = Array.from(document.querySelectorAll('.mat-mdc-menu-content button, [role="menuitem"], .cdk-overlay-container button'));
-        let targetItem = null;
-        const cleanType = (exportType || '').toLowerCase();
-        if (cleanType.includes('antigravity')) {
-            targetItem = menuItems.find(b => (b.innerText || '').toLowerCase().includes('antigravity'));
-        } else if (cleanType.includes('github')) {
-            targetItem = menuItems.find(b => (b.innerText || '').toLowerCase().includes('github'));
-        } else {
-            targetItem = menuItems.find(b => (b.innerText || '').toLowerCase().includes('zip') || (b.innerText || '').toLowerCase().includes('download'));
-        }
-        if (targetItem) {
-            targetItem.click();
-            return { ok: true, selected: targetItem.innerText.split('\n')[0].trim() };
-        }
-        return { ok: false, error: 'Export option not found for ' + exportType, available: menuItems.map(m => m.innerText.split('\n')[0].trim()) };
     }
 };
 """
 
 
 # -----------------------------------------------------------------------------
-# Main Driver Execution Logic
+# Main Driver Execution Logic & Zero-Lag Upload / RAM Parking
 # -----------------------------------------------------------------------------
+
+def _wait_for_upload_chip_ready(
+    profile_dir: str,
+    tab_id: int,
+    bundle_name: str,
+    bundle_stem: str,
+    timeout_sec: float = 6.0,
+) -> Dict[str, Any]:
+    """Polls up to timeout_sec for an AI Studio attachment chip to appear and upload spinner to finish."""
+    deadline = time.time() + max(0.5, timeout_sec)
+    check_js = f"""(() => {{
+        const fileName = {json.dumps(bundle_name)};
+        const fileStem = {json.dumps(bundle_stem)};
+        const scope = document.querySelector('ms-prompt-input-wrapper, .prompt-input-wrapper, ms-chunk-editor, footer, main') || document.body;
+        const isVis = (el) => {{
+            if (!el || el.offsetParent === null) return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        }};
+        const chips = Array.from(scope.querySelectorAll(
+            'ms-file-chip, .file-chip, .attachment, .attachment-chip, ms-prompt-chunk, ms-media-chunk, [class*="file-chip"], [class*="attachment"]'
+        )).filter(isVis);
+        const scopeText = (scope.innerText || '');
+        const hasName = Boolean((fileName && scopeText.includes(fileName)) || (fileStem && scopeText.includes(fileStem)));
+        const spinners = Array.from(scope.querySelectorAll(
+            'mat-progress-spinner, mat-spinner, mat-progress-bar, [role="progressbar"], .uploading'
+        )).filter(isVis);
+        return {{
+            chip_detected: chips.length > 0 || hasName,
+            chips_count: chips.length,
+            has_name: hasName,
+            spinner_active: spinners.length > 0,
+            ready: (chips.length > 0 || hasName) && spinners.length === 0
+        }};
+    }})()"""
+    last_state: Dict[str, Any] = {}
+    while time.time() < deadline:
+        res = call_bridge_api(
+            "/command",
+            method="POST",
+            payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": check_js}},
+            timeout=10.0,
+        )
+        st = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"), dict) else {}
+        last_state = st
+        if st.get("ready"):
+            return {"ok": True, "verified_chip": True, "state": st}
+        time.sleep(0.5)
+    return {
+        "ok": False,
+        "verified_chip": False,
+        "state": last_state,
+        "error": f"Attachment chip for '{bundle_name}' not detected/settled in DOM within {timeout_sec}s",
+    }
+
+
+def upload_context_bundle_cdp(
+    profile_dir: str,
+    tab_id: int,
+    bundle_path: Path,
+    verify_timeout_sec: float = 6.0,
+) -> Dict[str, Any]:
+    """Uploads a local context bundle file to AI Studio Playground via CDP DOM.setFileInputFiles (with chip readiness verification)."""
+    abs_file = str(bundle_path.resolve())
+    call_bridge_api("/command", method="POST", payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "DOM.enable"}})
+
+    def _query_file_input() -> int:
+        doc_res = call_bridge_api("/command", method="POST", payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "DOM.getDocument", "params": {"depth": -1, "pierce": True}}})
+        root_id = (doc_res.get("result") or {}).get("root", {}).get("nodeId", 0)
+        if not root_id:
+            return 0
+        q_res = call_bridge_api("/command", method="POST", payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "DOM.querySelector", "params": {"nodeId": root_id, "selector": "input[type='file']"}}})
+        return int((q_res.get("result") or {}).get("nodeId", 0) or 0)
+
+    node_id = _query_file_input()
+    if not node_id:
+        # Click Playground '+' / Insert asset button to mount <input type="file">
+        call_bridge_api(
+            "/command",
+            method="POST",
+            payload={
+                "action": "EVAL_DOM",
+                "profile": profile_dir,
+                "params": {
+                    "tabId": tab_id,
+                    "code": """(() => {
+                        const addBtn = document.querySelector('button[aria-label*="Insert" i], button[aria-label*="Add" i], ms-add-chunk-menu button, button.add-chunk-button');
+                        if (addBtn) { addBtn.click(); return true; }
+                        return false;
+                    })()""",
+                },
+            },
+        )
+        time.sleep(0.5)
+        node_id = _query_file_input()
+
+    dispatched_method = None
+    if node_id:
+        set_res = call_bridge_api(
+            "/command",
+            method="POST",
+            payload={
+                "action": "CDP_COMMAND",
+                "profile": profile_dir,
+                "params": {"tabId": tab_id, "method": "DOM.setFileInputFiles", "params": {"nodeId": node_id, "files": [abs_file]}},
+            },
+        )
+        if set_res.get("ok"):
+            # Dismiss any open '+' menu backdrop cleanly
+            call_bridge_api("/command", method="POST", payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "const bd = document.querySelector('.cdk-overlay-backdrop'); if (bd) bd.click();"}})
+            dispatched_method = "DOM.setFileInputFiles"
+            chip_res = _wait_for_upload_chip_ready(
+                profile_dir, tab_id, bundle_path.name, bundle_path.stem, timeout_sec=verify_timeout_sec
+            )
+            if chip_res.get("verified_chip"):
+                return {"ok": True, "verified_chip": True, "method": dispatched_method, "file": abs_file, "chip_state": chip_res.get("state")}
+
+    # In-memory DataTransfer drop/paste fallback (never steals Windows OS clipboard)
+    b64_data = base64.b64encode(bundle_path.read_bytes()).decode("ascii")
+    drop_js = f"""(() => {{
+        const b64 = {json.dumps(b64_data)};
+        const binStr = atob(b64);
+        const bytes = new Uint8Array(binStr.length);
+        for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+        const dt = new DataTransfer();
+        dt.items.add(new File([bytes], {json.dumps(bundle_path.name)}, {{ type: 'text/plain', lastModified: Date.now() }}));
+        const ta = document.querySelector('textarea[aria-label*="Enter a prompt" i], .cdk-textarea-autosize.textarea, textarea');
+        if (!ta) return {{ ok: false, error: 'Prompt textarea not found for DataTransfer upload' }};
+        ta.focus();
+        ta.dispatchEvent(new DragEvent('drop', {{ bubbles: true, cancelable: true, dataTransfer: dt }}));
+        return {{ ok: true, method: 'DataTransfer.drop' }};
+    }})()"""
+    res = call_bridge_api("/command", method="POST", payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": drop_js}})
+    drop_out = res.get("result") if isinstance(res, dict) and isinstance(res.get("result"), dict) else {}
+    if drop_out.get("ok"):
+        chip_res = _wait_for_upload_chip_ready(
+            profile_dir, tab_id, bundle_path.name, bundle_path.stem, timeout_sec=min(4.0, verify_timeout_sec)
+        )
+        if chip_res.get("verified_chip"):
+            return {"ok": True, "verified_chip": True, "method": "DataTransfer.drop", "file": abs_file, "chip_state": chip_res.get("state")}
+        return {"ok": False, "verified_chip": False, "method": dispatched_method or "DataTransfer.drop", "error": chip_res.get("error", "Attachment chip not detected")}
+    return {"ok": False, "verified_chip": False, "method": dispatched_method or "none", "error": drop_out.get("error") or "Upload failed"}
+
+
+def park_tab_about_blank(profile_dir: str, tab_id: int) -> None:
+    """Parks idle agent-owned AI Studio Playground tab at about:blank to free ~500-800 MB Angular V8 heap."""
+    try:
+        call_bridge_api(
+            "/command",
+            method="POST",
+            payload={
+                "action": "CDP_COMMAND",
+                "profile": profile_dir,
+                "agent_guarded": True,
+                "params": {"tabId": tab_id, "method": "Page.navigate", "params": {"url": "about:blank"}},
+            },
+            timeout=10.0,
+        )
+    except Exception:
+        pass
+
+
+def reclaim_finished_tab(profile_dir: str, tab_id: int) -> None:
+    """Close an owned tab with a sibling in its window, or park a verified sole tab."""
+    try:
+        listed = call_bridge_api(
+            "/command", method="POST",
+            payload={"action": "LIST_TABS", "profile": profile_dir}, timeout=5.0,
+        )
+        if not listed.get("ok") or not isinstance(listed.get("tabs"), list):
+            return
+        tabs = listed["tabs"]
+        target = next((tab for tab in tabs if tab.get("id") == tab_id), None)
+        if target is None or target.get("windowId") is None:
+            return
+        if not any(tab.get("windowId") == target["windowId"] and tab.get("id") != tab_id for tab in tabs):
+            park_tab_about_blank(profile_dir, tab_id)
+            return
+        result = call_bridge_api(
+            "/command", method="POST",
+            payload={"action": "CLOSE_TAB", "profile": profile_dir, "agent_guarded": True, "params": {"tabId": tab_id}},
+            timeout=5.0,
+        )
+        if result.get("ok"):
+            print(f"[AIStudioSubagent] Closed finished agent tab {tab_id}.")
+    except Exception as exc:
+        print(f"[AIStudioSubagent] Could not reclaim finished tab {tab_id}: {exc}", file=sys.stderr)
+
 
 def ensure_extension_ready(preferred_profile: str, target_url: str = "https://aistudio.google.com/prompts/new_chat") -> Dict[str, Any]:
     """Ensures Chrome is running with the extension connected for the specified profile."""
     status = call_bridge_api("/status")
     connected = status.get("connected_extensions", [])
 
-    # Check if preferred profile is connected
     for c in connected:
         if c.get("dir_name") == preferred_profile or c.get("email") == preferred_profile:
             return c
 
-    # Not connected -> Launch Chrome window with extension
+    # Prefer interactive /profile/open when host is on WinSta0\Default
     print(f"[AIStudioSubagent] Chrome extension not connected for {preferred_profile}. Launching...")
-    launch_res = call_bridge_api("/launch", method="POST", payload={"profile": preferred_profile, "url": target_url})
+    if status.get("interactive_desktop"):
+        launch_res = call_bridge_api("/profile/open", method="POST", payload={"profile": preferred_profile, "url": target_url, "auto_close_idle": True}, timeout=25.0)
+    else:
+        launch_res = call_bridge_api("/launch", method="POST", payload={"profile": preferred_profile, "url": target_url})
     if not launch_res.get("ok"):
         raise RuntimeError(f"Failed to launch Chrome for {preferred_profile}: {launch_res.get('error')}")
 
@@ -652,55 +1110,98 @@ def ensure_extension_ready(preferred_profile: str, target_url: str = "https://ai
     raise ConnectionError(f"Chrome launched for {preferred_profile}, but extension failed to connect to {BRIDGE_URL}/ws within 15s.")
 
 
+def _get_owned_tab_ids_for_profile(profile_dir: Optional[str]) -> set[str]:
+    """Queries bridge GET /resources to obtain strictly agent-owned tab IDs for profile_dir."""
+    if not profile_dir:
+        return set()
+    try:
+        res = call_bridge_api("/resources", method="GET", timeout=5.0)
+        if isinstance(res, dict) and res.get("ok"):
+            prof_tabs = (res.get("owned_tabs") or {}).get(profile_dir) or {}
+            return {str(k) for k in prof_tabs.keys()}
+    except Exception:
+        pass
+    return set()
+
+
 def find_or_open_ai_studio_tab(
     client: Dict[str, Any],
     target_url: str = "https://aistudio.google.com/prompts/new_chat",
     navigate_if_different: bool = True,
+    owner: str = "aistudio_subagent",
+    task: str = "",
 ) -> Tuple[int, bool]:
-    """Single-Tab Invariant: Reuses existing aistudio.google.com tab to preserve low-RAM bounds."""
+    """Strict Agent-Owned Tab Reuse: ONLY reuses tabs listed in /resources owned_tabs; never hijacks user tabs."""
     profile_dir = client.get("dir_name")
+    owned_ids = _get_owned_tab_ids_for_profile(profile_dir)
     tabs_res = call_bridge_api("/command", method="POST", payload={"action": "LIST_TABS", "profile": profile_dir})
     tabs = tabs_res.get("tabs", [])
 
-    # Search for open AI Studio tab
+    # Search strictly among AGENT-OWNED tabs (prefer AI Studio tab, then parked about:blank tab)
+    owned_aistudio_tab = None
+    owned_blank_tab = None
     for t in tabs:
+        tid_str = str(t.get("id"))
+        if tid_str not in owned_ids:
+            continue
         t_url = t.get("url") or ""
         if "aistudio.google.com" in t_url:
-            tab_id = t["id"]
-            print(f"[AIStudioSubagent] Reusing existing AI Studio tab (tabId: {tab_id}, url: {t_url}) [Single-Tab Invariant]")
-            # Bring tab to front
-            call_bridge_api("/command", method="POST", payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "Page.bringToFront"}})
-            
-            # Check if navigation to target surface or model is required
-            current_base = t_url.split("?")[0].rstrip("/")
-            target_base = target_url.split("?")[0].rstrip("/")
-            needs_nav = False
-            
-            if "/onboarding" in t_url:
-                needs_nav = True
-            elif navigate_if_different and current_base != target_base:
-                needs_nav = True
-            elif navigate_if_different and "?model=" in target_url and target_url not in t_url:
-                needs_nav = True
-                
-            if needs_nav:
-                print(f"[AIStudioSubagent] Navigating tab to target surface -> {target_url}...")
-                call_bridge_api("/command", method="POST", payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "Page.navigate", "params": {"url": target_url}}})
-                time.sleep(3.5)
-                
-            return tab_id, True
+            owned_aistudio_tab = t
+            break
+        if t_url.strip().lower() in ("about:blank", "chrome://newtab/", "chrome://newtab") and owned_blank_tab is None:
+            owned_blank_tab = t
 
-    # No AI Studio tab found -> Open exactly ONE tab
-    print(f"[AIStudioSubagent] No open AI Studio tab found. Opening single tab -> {target_url}...")
+    chosen_tab = owned_aistudio_tab or owned_blank_tab
+    if chosen_tab is not None:
+        tab_id = chosen_tab["id"]
+        t_url = chosen_tab.get("url") or ""
+        print(f"[AIStudioSubagent] Reusing agent-owned tab (tabId: {tab_id}, url: {t_url})")
+        call_bridge_api("/command", method="POST", payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "Page.bringToFront"}})
+
+        current_base = t_url.split("?")[0].rstrip("/")
+        target_base = target_url.split("?")[0].rstrip("/")
+        needs_nav = False
+
+        if "aistudio.google.com" not in t_url or "/onboarding" in t_url:
+            needs_nav = True
+        elif navigate_if_different and current_base != target_base:
+            needs_nav = True
+        elif navigate_if_different and "?model=" in target_url and target_url not in t_url:
+            needs_nav = True
+
+        if needs_nav:
+            print(f"[AIStudioSubagent] Navigating agent-owned tab to target surface -> {target_url}...")
+            call_bridge_api(
+                "/command",
+                method="POST",
+                payload={
+                    "action": "CDP_COMMAND",
+                    "profile": profile_dir,
+                    "agent_guarded": True,
+                    "params": {"tabId": tab_id, "method": "Page.navigate", "params": {"url": target_url}},
+                },
+            )
+            time.sleep(3.5)
+
+        return tab_id, True
+
+    # No agent-owned tab found -> Open a fresh tab (server.py enforces MAX_AGENT_TABS=6 & registers ownership)
+    print(f"[AIStudioSubagent] No agent-owned AI Studio tab found on {profile_dir}. Opening new agent tab -> {target_url}...")
     open_res = call_bridge_api(
         "/command",
         method="POST",
         payload={
             "action": "OPEN_TAB",
             "profile": profile_dir,
+            "owner": owner,
+            "surface": "aistudio",
+            "task": task,
+            "agent_guarded": True,
             "params": {"url": target_url, "active": True},
         },
     )
+    if open_res.get("code") == "AGENT_CAPACITY_REACHED":
+        raise RuntimeError(f"AGENT_CAPACITY_REACHED: {open_res.get('error')}")
     tab_id = open_res.get("tabId")
     if not tab_id:
         raise RuntimeError(f"Failed to open AI Studio tab: {open_res}")
@@ -742,66 +1243,80 @@ def capture_tab_screenshot(client: Dict[str, Any], tab_id: int, output_path: str
 def ask_ai_studio(
     prompt: str = "",
     context_files: Optional[List[str]] = None,
-    preferred_profile: str = "Profile 14",
+    preferred_profile: Optional[str] = None,
     model_name: str = "gemini-4-argon",
     system_instructions: Optional[str] = None,
+    system_skill: Optional[str] = None,
+    thinking: str = "High",
+    max_output_tokens: int = 800000,
+    search: bool = False,
+    code_exec: bool = False,
+    url_context: bool = False,
     timeout_sec: int = 300,
     output_file: Optional[str] = None,
     screenshot_path: Optional[str] = None,
     agent_id: str = "aistudio_subagent",
     session_id: Optional[str] = None,
-    target_mode: str = "chat",  # chat or freeform
-    surface: str = "playground",  # playground, freeform, apps, build, gallery, my_apps, library
+    target_mode: str = "chat",
+    surface: str = "playground",
     get_code: bool = False,
     get_code_output: Optional[str] = None,
-    search_gallery: Optional[str] = None,
-    remix_target: Optional[str] = None,
-    remix_name: Optional[str] = None,
-    remix_desc: Optional[str] = None,
-    export_app: Optional[str] = None,
     continue_chat: bool = False,
+    keep_tab: bool = False,
+    stall_reload_sec: float = 90.0,
+    poll_interval_sec: float = 2.0,
+    max_recovery_retries: int = 2,
 ) -> Dict[str, Any]:
-    """Executes queries and workflows across all Google AI Studio platform surfaces."""
+    """Executes Playground-only consulting & codebase audits on AI Studio (4 Argon / 4 Neon)."""
     start_time = time.time()
     sid = session_id or f"studio_{int(start_time)}"
     surface_clean = surface.lower().strip()
 
-    if surface_clean in ("apps", "build"):
-        target_url = "https://aistudio.google.com/apps"
-    elif surface_clean == "gallery":
-        target_url = "https://aistudio.google.com/apps?source=showcase"
-    elif surface_clean == "my_apps":
-        target_url = "https://aistudio.google.com/apps?source=user"
-    elif surface_clean == "library":
-        target_url = "https://aistudio.google.com/library"
-    elif surface_clean == "freeform" or target_mode == "freeform":
-        target_url = f"https://aistudio.google.com/prompts/new_freeform?model={model_name}"
+    if surface_clean in ("apps", "build", "gallery", "my_apps", "library"):
+        return {
+            "ok": False,
+            "code": "SURFACE_RETIRED",
+            "error": (
+                f"AI Studio surface '{surface_clean}' (/apps Builder / Gallery) is retired. "
+                "Use Playground (--surface playground) with gemini-4-argon / gemini-4-neon for consulting & audits, "
+                "and Antigravity Hydrogen locally for code edits."
+            ),
+        }
+
+    validated_model = validate_aistudio_model(model_name)
+    bucket_name = "aistudio_neon" if "neon" in validated_model else "aistudio_argon"
+    max_tokens_clamped = max(1, min(1048576, int(max_output_tokens or 800000)))
+
+    merged_sys = (system_instructions or "").strip()
+    if system_skill:
+        skill_text = resolve_system_skill(system_skill)
+        merged_sys = f"{skill_text}\n\n{merged_sys}".strip() if merged_sys else skill_text
+
+    if surface_clean == "freeform" or target_mode == "freeform":
+        target_url = f"https://aistudio.google.com/prompts/new_freeform?model={validated_model}"
     else:
-        target_url = f"https://aistudio.google.com/prompts/new_chat?model={model_name}"
+        target_url = f"https://aistudio.google.com/prompts/new_chat?model={validated_model}"
 
     print("\n" + "=" * 80)
-    print(" GOOGLE AI STUDIO FULL-PLATFORM ORCHESTRATOR")
+    print(" GOOGLE AI STUDIO PLAYGROUND ORCHESTRATOR (Stateless High-Context)")
     print("=" * 80)
-    print(f"Profile Preference : {preferred_profile}")
-    print(f"Target Model       : {model_name}")
-    print(f"Surface Mode       : {surface_clean} ({target_url})")
+    print(f"Profile Preference : {preferred_profile or 'Waterfall Drain (Tier 1 Alt First)'}")
+    print(f"Target Model       : {validated_model} (Thinking: {thinking}, MaxTokens: {max_tokens_clamped:,})")
+    print(f"Tools              : Search={'ON' if search else 'OFF'} | CodeExec={'ON' if code_exec else 'OFF'} | URL={'ON' if url_context else 'OFF'}")
+    print(f"Target URL         : {target_url}")
+    if system_skill:
+        print(f"System Skill       : {system_skill}")
     if prompt:
         print(f"Prompt             : {prompt[:70]}...")
     if context_files:
         print(f"Context Files      : {len(context_files)} file(s)")
-    if get_code:
-        print(f"Get Code Harvest   : Enabled (output: {get_code_output or 'auto'})")
-    if search_gallery:
-        print(f"Gallery Search     : '{search_gallery}'")
-    if remix_target:
-        print(f"Gallery Remix      : '{remix_target}'")
     print(f"Timeout            : {timeout_sec}s")
     print("=" * 80 + "\n")
 
-    # 1. Lease Acquisition via Profile Lock Manager
-    leased_profile = preferred_profile
+    # 1. Surface-Scoped & Bucket-Aware Lease Acquisition via Profile Lock Manager
+    leased_profile = preferred_profile or "Profile 13"
     if profile_lock_manager:
-        task_desc = f"AI Studio ({surface_clean}:{model_name})"
+        task_desc = f"AI Studio ({validated_model})"
         if prompt:
             task_desc += f": {prompt[:30]}"
         target_p, err = profile_lock_manager.acquire_profile_lease(
@@ -810,24 +1325,53 @@ def ask_ai_studio(
             task=task_desc,
             session_id=sid,
             lease_seconds=float(timeout_sec + 60),
+            surface="aistudio",
+            bucket=bucket_name,
         )
-        if target_p:
-            leased_profile = target_p
-            print(f"[AIStudioSubagent] Active lease granted on: {leased_profile}")
-        else:
-            print(f"[AIStudioSubagent] Warning acquiring lease: {err}. Proceeding with: {leased_profile}")
+        if not target_p:
+            return {"ok": False, "error": err or "No AI Studio profile available on bucket " + bucket_name}
+        leased_profile = target_p
+        print(f"[AIStudioSubagent] Active lease granted on: {leased_profile} (bucket={bucket_name})")
 
-    heartbeat = HeartbeatThread(leased_profile, agent_id=agent_id)
+    heartbeat = HeartbeatThread(leased_profile, agent_id=agent_id, surface="aistudio")
     heartbeat.start()
+    tab_id: Optional[int] = None
+    profile_dir: str = leased_profile
 
     try:
         # 2. Ensure Extension is Ready & Connected
         client = ensure_extension_ready(leased_profile, target_url=target_url)
         profile_dir = client.get("dir_name", leased_profile)
 
-        # 3. Single-Tab Invariant: Find or open AI Studio tab & navigate
-        tab_id, was_existing = find_or_open_ai_studio_tab(client, target_url=target_url, navigate_if_different=True)
-        time.sleep(3.0 if was_existing else 6.0)
+        # 3. Agent-Owned Tab Reuse: Open or navigate directly via ?model= URL (never hijacks user tabs)
+        tab_id, was_existing = find_or_open_ai_studio_tab(
+            client,
+            target_url=target_url,
+            navigate_if_different=True,
+            owner=agent_id,
+            task=(prompt or "")[:60],
+        )
+        try:
+            call_bridge_api(
+                "/command", method="POST", timeout=5.0,
+                payload={"action": "CDP_COMMAND", "profile": profile_dir, "agent_guarded": True,
+                         "params": {"tabId": tab_id, "method": "Emulation.setFocusEmulationEnabled",
+                                    "params": {"enabled": True}}},
+            )
+        except Exception as exc:
+            print(f"[AIStudioSubagent] Focus emulation unavailable: {exc}", file=sys.stderr)
+        time.sleep(3.0 if was_existing else 5.5)
+
+        # Check auth redirect (NEEDS_REAUTH)
+        url_check = call_bridge_api(
+            "/command",
+            method="POST",
+            payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.location.href"}},
+        ).get("result", "")
+        if "accounts.google.com" in str(url_check):
+            if profile_lock_manager:
+                profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
+            return {"ok": False, "code": "NEEDS_REAUTH", "error": f"Profile {profile_dir} redirected to sign-in ({url_check})."}
 
         # 4. Inject Helper Library into Tab
         call_bridge_api(
@@ -836,119 +1380,22 @@ def ask_ai_studio(
             payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": AI_STUDIO_HELPERS_JS}},
         )
 
-        # 5. Handle Onboarding, Cookie Banners, & Modals
+        # 5. Dismiss safe modals & run 3-Stage Popup Self-Healer
         call_bridge_api(
             "/command",
             method="POST",
             payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.handleOnboardingAndModals();"}},
         )
-        time.sleep(0.5)
-
-        # ---------------------------------------------------------------------
-        # SURFACE: GALLERY
-        # ---------------------------------------------------------------------
-        if surface_clean == "gallery":
-            print("[AIStudioSubagent] Operating on Showcase Gallery surface...")
-            gallery_data = {}
-            if search_gallery:
-                print(f"[AIStudioSubagent] Searching showcase apps for: '{search_gallery}'...")
-                res = call_bridge_api(
-                    "/command",
-                    method="POST",
-                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.searchShowcaseApps({json.dumps(search_gallery)});"}},
-                )
-                gallery_data["search_results"] = res.get("result", {})
-                print(f"[AIStudioSubagent] Discovered {gallery_data['search_results'].get('count', 0)} showcase app(s).")
-
-            if remix_target:
-                print(f"[AIStudioSubagent] Remixing showcase app: '{remix_target}'...")
-                res = call_bridge_api(
-                    "/command",
-                    method="POST",
-                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.remixShowcaseApp({json.dumps(remix_target)}, {json.dumps(remix_name)}, {json.dumps(remix_desc)});"}},
-                )
-                gallery_data["remix_status"] = res.get("result", {})
-                print(f"[AIStudioSubagent] Remix status: {gallery_data['remix_status']}")
-
-            if screenshot_path:
-                capture_tab_screenshot(client, tab_id, screenshot_path)
-
-            return {
-                "ok": True,
-                "surface": "gallery",
-                "profile": leased_profile,
-                "duration_seconds": round(time.time() - start_time, 1),
-                "data": gallery_data,
-            }
-
-        # ---------------------------------------------------------------------
-        # SURFACE: APP BUILDER (BUILD / APPS)
-        # ---------------------------------------------------------------------
-        if surface_clean in ("apps", "build"):
-            print("[AIStudioSubagent] Operating on App Builder (/apps) surface...")
-            if not prompt:
-                raise ValueError("App Builder mode requires a prompt describing the app to build.")
-
-            print(f"[AIStudioSubagent] Injecting app description prompt: {prompt[:80]}...")
-            call_bridge_api(
-                "/command",
-                method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.dispatchBuildApp({json.dumps(prompt)});"}},
+        if popup_healer:
+            heal_res = popup_healer.dismiss_blocking_popups(
+                eval_fn=lambda code: call_bridge_api("/command", method="POST", payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": code}}),
+                screenshot_fn=lambda out_p: capture_tab_screenshot(client, tab_id, out_p),
+                surface="aistudio",
+                target_point=(0.45, 0.85),
             )
-            time.sleep(3.0)
+            if heal_res.get("blocked"):
+                return {"ok": False, "code": "POPUP_BLOCKING_INPUT", "error": f"Unknown blocking modal on AI Studio: {heal_res.get('anomaly_screenshot')}"}
 
-            # Monitor generation stream
-            print(f"[AIStudioSubagent] Monitoring app generation loop (timeout: {timeout_sec}s)...")
-            poll_start = time.time()
-            seen_files = set()
-            while time.time() - poll_start < timeout_sec:
-                time.sleep(3.0)
-                st_res = call_bridge_api(
-                    "/command",
-                    method="POST",
-                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.getAppBuilderStatus();"}},
-                )
-                st = st_res.get("result") or {}
-                files = st.get("files", [])
-                is_working = st.get("is_working", False)
-                new_files = [f for f in files if f not in seen_files]
-                for nf in new_files:
-                    seen_files.add(nf)
-                    print(f"\n[AIStudioSubagent] [+] Generated File: {nf}")
-
-                elapsed = round(time.time() - poll_start, 1)
-                print(f"\r[AIStudioSubagent] [{elapsed}s] App Builder Generating: {is_working} | Total Files: {len(seen_files)}    ", end="", flush=True)
-
-                if not is_working and len(seen_files) > 0 and elapsed > 15.0:
-                    print(f"\n[AIStudioSubagent] App generation complete!")
-                    break
-
-            if screenshot_path:
-                capture_tab_screenshot(client, tab_id, screenshot_path)
-
-            export_result = None
-            if export_app:
-                print(f"[AIStudioSubagent] Triggering export: {export_app}...")
-                exp_res = call_bridge_api(
-                    "/command",
-                    method="POST",
-                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.exportAppProject({json.dumps(export_app)});"}},
-                )
-                export_result = exp_res.get("result")
-                print(f"[AIStudioSubagent] Export result: {export_result}")
-
-            return {
-                "ok": True,
-                "surface": "apps",
-                "profile": leased_profile,
-                "duration_seconds": round(time.time() - start_time, 1),
-                "generated_files": list(seen_files),
-                "export_result": export_result,
-            }
-
-        # ---------------------------------------------------------------------
-        # SURFACE: PLAYGROUND & FREEFORM
-        # ---------------------------------------------------------------------
         if not continue_chat:
             call_bridge_api(
                 "/command",
@@ -960,35 +1407,101 @@ def ask_ai_studio(
         if screenshot_path:
             capture_tab_screenshot(client, tab_id, screenshot_path)
 
-        # Model selection (if not already locked by URL)
-        if model_name:
+        # 6. Mandatory Post-Load Model Card Assertion (NEVER allow Gemini 4 Hydrogen!)
+        # Poll briefly on cold tab loads until Angular mounts .model-selector-card
+        assert_res = {}
+        for _wait_i in range(12):
+            assert_res = (
+                call_bridge_api(
+                    "/command",
+                    method="POST",
+                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.assertActiveModel({json.dumps(validated_model)});"}},
+                ).get("result")
+                or {}
+            )
+            if assert_res.get("ok") or assert_res.get("blocked") or (assert_res.get("actual") or "").strip():
+                break
+            time.sleep(0.7)
+        if not assert_res.get("ok"):
+            print(f"[AIStudioSubagent] Model card check: {assert_res}. Attempting fallback UI selection -> {validated_model}...")
             call_bridge_api(
                 "/command",
                 method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.selectModel({json.dumps(model_name)});"}},
+                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.selectModel({json.dumps(validated_model)});"}},
             )
+            time.sleep(0.5)
+            assert_res = (
+                call_bridge_api(
+                    "/command",
+                    method="POST",
+                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.assertActiveModel({json.dumps(validated_model)});"}},
+                ).get("result")
+                or {}
+            )
+            if assert_res.get("blocked") or not assert_res.get("ok"):
+                return {
+                    "ok": False,
+                    "code": "MODEL_ASSERTION_FAILED",
+                    "error": f"Refusing to run prompt: active AI Studio model card did not match {validated_model} ({assert_res}).",
+                }
 
-        # Inject System Instructions
-        if system_instructions:
-            print(f"[AIStudioSubagent] Injecting System Instructions ({len(system_instructions)} chars)...")
+        # 7. Configure Run Settings (Thinking, 800k output tokens, Search OFF, CodeExec, URL context)
+        run_cfg_res = call_bridge_api(
+            "/command",
+            method="POST",
+            payload={
+                "action": "EVAL_DOM",
+                "profile": profile_dir,
+                "params": {
+                    "tabId": tab_id,
+                    "code": f"window.__agyStudio.configureRunSettings({json.dumps({'thinking': thinking, 'maxOutputTokens': max_tokens_clamped, 'search': bool(search), 'codeExec': bool(code_exec), 'urlContext': bool(url_context)})});",
+                },
+            },
+        ).get("result") or {}
+        print(f"[AIStudioSubagent] Run Settings configured: {run_cfg_res}")
+
+        # 8. Inject System Instructions (Persona + inline instructions)
+        if merged_sys:
+            print(f"[AIStudioSubagent] Injecting System Instructions ({len(merged_sys)} chars)...")
             call_bridge_api(
                 "/command",
                 method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.setSystemInstructions({json.dumps(system_instructions)});"}},
+                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.setSystemInstructions({json.dumps(merged_sys)});"}},
             )
 
-        # Bundle Context Files & Synthesize Prompt
-        full_prompt = prompt
-        est_tokens = int(len(prompt) / 3.8)
-        if context_files:
-            bundle_text, file_tokens = bundle_context_files(context_files)
-            est_tokens += file_tokens
-            full_prompt = f"### BUNDLED CONTEXT FILES ({len(context_files)} files, ~{file_tokens} tokens):\n\n{bundle_text}\n\n### TASK INSTRUCTIONS:\n{prompt}"
-            print(f"[AIStudioSubagent] Bundled {len(context_files)} context files. Total payload: ~{est_tokens:,} tokens ({len(full_prompt):,} chars).")
+        # 9. Zero-Lag CDP File Upload when -f files exist OR prompt exceeds 10k chars
+        short_prompt = _scrub_for_cloud(prompt or "")
+        est_tokens = int(len(short_prompt) / 3.8)
+        if context_files or len(short_prompt) > 10000:
+            bundle_parts: List[str] = []
+            if context_files:
+                bundle_text, file_tokens = bundle_context_files(context_files)
+                est_tokens += file_tokens
+                bundle_parts.append(bundle_text)
+            if len(short_prompt) > 10000:
+                bundle_parts.append(f"=== FULL CONTEXT / PROMPT ===\n{short_prompt}\n")
+                short_prompt = (
+                    "Read the attached context bundle file thoroughly and respond to all instructions inside it. "
+                    + short_prompt[:500]
+                )
+            combined_bundle = _scrub_for_cloud("\n\n".join(bundle_parts))
+            bundle_file = Path(r"./temp_read") / f"aistudio_context_{int(time.time() * 1000)}.txt"
+            bundle_file.parent.mkdir(parents=True, exist_ok=True)
+            bundle_file.write_text(combined_bundle, encoding="utf-8")
+            print(f"[AIStudioSubagent] Uploading context bundle ({len(combined_bundle):,} chars) via CDP DOM.setFileInputFiles -> {bundle_file.name}...")
+            up_res = upload_context_bundle_cdp(profile_dir, tab_id, bundle_file)
+            print(f"[AIStudioSubagent] Upload result: {up_res}")
+            if not up_res.get("ok") or not up_res.get("verified_chip"):
+                # Safe inline fallback when attachment chip was not verified so context is NEVER silently dropped
+                if len(combined_bundle) <= 60000:
+                    print(f"[AIStudioSubagent] Attachment chip not verified in DOM; falling back to inline prompt injection ({len(combined_bundle):,} chars).")
+                    short_prompt = f"{combined_bundle}\n\n### TASK INSTRUCTIONS:\n{short_prompt}"
+                else:
+                    print(f"[AIStudioSubagent] Warning: attachment chip not verified and bundle exceeds 60k inline cap ({len(combined_bundle):,} chars).", file=sys.stderr)
+            time.sleep(0.8)
 
         harvested_code = None
-        if get_code and not full_prompt:
-            # Just harvest code directly without running prompt
+        if get_code and not short_prompt:
             print("[AIStudioSubagent] Harvesting <> Get code snippet from active Playground contract...")
             h_res = call_bridge_api(
                 "/command",
@@ -1000,33 +1513,31 @@ def ask_ai_studio(
                 p = Path(get_code_output)
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(harvested_code, encoding="utf-8")
-                print(f"[AIStudioSubagent] <> Get code snippet saved -> {p.as_posix()}")
-
             return {
                 "ok": True,
                 "surface": "playground",
                 "profile": leased_profile,
-                "model": model_name,
+                "model": validated_model,
                 "harvested_code": harvested_code,
                 "duration_seconds": round(time.time() - start_time, 1),
             }
 
-        # Inject Prompt into AI Studio Prompt Box
-        if full_prompt:
+        # 10. Inject Concise Prompt & Run
+        if short_prompt:
             print("[AIStudioSubagent] Injecting prompt payload into AI Studio editor...")
             call_bridge_api(
                 "/command",
                 method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.injectPrompt({json.dumps(full_prompt)});"}},
+                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.injectPrompt({json.dumps(short_prompt)});"}},
             )
 
             # Record baseline turns
             pre_status = call_bridge_api(
                 "/command",
                 method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.getGenerationStatus();"}},
+                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.getGenerationStatus(0);"}},
             ).get("result") or {}
-            baseline_answer_turns = pre_status.get("answer_turns_count", 0)
+            baseline_answer_turns = int(pre_status.get("answer_turns_count", 0) or 0)
 
             # Trigger Run
             print("[AIStudioSubagent] Triggering Run (execution started)...")
@@ -1035,31 +1546,182 @@ def ask_ai_studio(
                 method="POST",
                 payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.clickRun();"}},
             )
-            time.sleep(2.0)
+            time.sleep(min(2.0, max(0.0, poll_interval_sec)))
 
-            # Await Stream Completion
+            def _recover_mid_poll(reason: str, do_reload: bool = True) -> None:
+                print(f"\n[AIStudioSubagent] Mid-poll recovery ({reason}, reload={do_reload})...", file=sys.stderr)
+                try:
+                    if popup_healer:
+                        popup_healer.dismiss_blocking_popups(
+                            eval_fn=lambda code: call_bridge_api("/command", method="POST", payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": code}}),
+                            screenshot_fn=lambda out_p: capture_tab_screenshot(client, tab_id, out_p),
+                            surface="aistudio",
+                            target_point=(0.45, 0.85),
+                        )
+                    call_bridge_api(
+                        "/command",
+                        method="POST",
+                        payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio && window.__agyStudio.handleOnboardingAndModals();"}},
+                    )
+                except Exception:
+                    pass
+                if do_reload:
+                    try:
+                        call_bridge_api(
+                            "/command",
+                            method="POST",
+                            payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "Page.reload"}},
+                            timeout=15.0,
+                        )
+                        time.sleep(min(3.5, max(0.05, poll_interval_sec)))
+                        call_bridge_api(
+                            "/command",
+                            method="POST",
+                            payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": AI_STUDIO_HELPERS_JS}},
+                        )
+                        if popup_healer:
+                            popup_healer.dismiss_blocking_popups(
+                                eval_fn=lambda code: call_bridge_api("/command", method="POST", payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": code}}),
+                                screenshot_fn=lambda out_p: capture_tab_screenshot(client, tab_id, out_p),
+                                surface="aistudio",
+                                target_point=(0.45, 0.85),
+                            )
+                    except Exception:
+                        pass
+
+            # Await Stream Completion with error-banner fast-fail & bounded network/stall/popup recovery
+            def _rerun_in_place() -> bool:
+                try:
+                    result = call_bridge_api(
+                        "/command", method="POST", timeout=5.0,
+                        payload={"action": "EVAL_DOM", "profile": profile_dir,
+                                 "params": {"tabId": tab_id, "code": f"window.__agyStudio.rerunCurrentPrompt({baseline_answer_turns});"}},
+                    )
+                    return bool(result.get("ok") and (result.get("result") or {}).get("ok"))
+                except Exception:
+                    return False
+
             print(f"[AIStudioSubagent] Monitoring generation stream (timeout: {timeout_sec}s)...")
             poll_start = time.time()
+            last_activity_ts = poll_start
             last_length = 0
+            last_thought_chars = 0
+            last_thought_turns = 0
+            last_is_gen = False
             stable_count = 0
+            completed_cleanly = False
+            recovery_attempts = 0
+            eval_failures = 0
+            empty_rerun_until = None
 
             while time.time() - poll_start < timeout_sec:
-                time.sleep(2.0)
-                status_res = call_bridge_api(
-                    "/command",
-                    method="POST",
-                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.getGenerationStatus();"}},
-                )
+                time.sleep(max(0.0, poll_interval_sec))
+                try:
+                    status_res = call_bridge_api(
+                        "/command",
+                        method="POST",
+                        payload={
+                            "action": "EVAL_DOM",
+                            "profile": profile_dir,
+                            "params": {"tabId": tab_id, "code": f"window.__agyStudio.getGenerationStatus({baseline_answer_turns});"},
+                        },
+                    )
+                except Exception as exc:
+                    status_res = {"ok": False, "error": str(exc)}
+
+                if not isinstance(status_res, dict) or not status_res.get("ok") or not isinstance(status_res.get("result"), dict):
+                    eval_failures += 1
+                    if recovery_attempts < max_recovery_retries:
+                        recovery_attempts += 1
+                        _recover_mid_poll(f"transient EVAL_DOM failure #{eval_failures}", do_reload=(eval_failures >= 2))
+                        last_activity_ts = time.time()
+                        continue
+                    err_diag = r"./temp_read\aistudio_timeout_diag.png"
+                    capture_tab_screenshot(client, tab_id, err_diag)
+                    return {
+                        "ok": False,
+                        "code": "EVAL_DOM_TRANSIENT_FAILURE",
+                        "error": f"Bridge EVAL_DOM failed repeatedly during AI Studio poll: {status_res}",
+                        "profile": leased_profile,
+                        "model": validated_model,
+                        "diagnostic_screenshot": err_diag,
+                        "recovery_attempts": recovery_attempts,
+                        "duration_seconds": round(time.time() - start_time, 1),
+                    }
+
+                eval_failures = 0
                 st_data = status_res.get("result") or {}
-                is_gen = st_data.get("is_generating", False)
-                cur_len = st_data.get("text_length", 0)
-                cur_answer_turns = st_data.get("answer_turns_count", 0)
-                has_answer = st_data.get("has_answer", False)
+                is_gen = bool(st_data.get("is_generating", False))
+                last_is_gen = is_gen
+                cur_len = int(st_data.get("text_length", 0) or 0)
+                cur_answer_turns = int(st_data.get("answer_turns_count", 0) or 0)
+                cur_thought_chars = int(st_data.get("thought_chars", 0) or 0)
+                cur_thought_turns = int(st_data.get("thought_turns_count", 0) or 0)
+                has_answer = bool(st_data.get("has_answer", False))
+                err_banner = st_data.get("error_banner")
+                is_transient_net = bool(st_data.get("is_transient_network_error", False))
                 telemetry = st_data.get("token_telemetry")
+
+                if cur_len > last_length or cur_thought_chars > last_thought_chars or cur_thought_turns > last_thought_turns:
+                    last_activity_ts = time.time()
+                last_thought_chars = max(last_thought_chars, cur_thought_chars)
+                last_thought_turns = max(last_thought_turns, cur_thought_turns)
 
                 elapsed = round(time.time() - poll_start, 1)
                 t_str = f" | Tokens: {telemetry}" if telemetry else ""
                 print(f"\r[AIStudioSubagent] [{elapsed}s] Generating: {is_gen} | Answer Chars: {cur_len}{t_str}    ", end="", flush=True)
+
+                # Fast-fail on error banners (with bounded in-place Rerun retry for transient network errors — never reload stateless Playground into blank!)
+                if err_banner:
+                    if is_transient_net and recovery_attempts < max_recovery_retries:
+                        recovery_attempts += 1
+                        _recover_mid_poll(f"transient network/DOM error: {err_banner}", do_reload=False)
+                        _rerun_in_place()
+                        time.sleep(2.0)
+                        last_activity_ts = time.time()
+                        continue
+                    print(f"\n[AIStudioSubagent] Error banner detected on AI Studio: {err_banner}", file=sys.stderr)
+                    if profile_lock_manager and re.search(r"quota|rate limit|resource has been exhausted|too many requests|429", str(err_banner), re.I):
+                        profile_lock_manager.mark_bucket_cooldown(leased_profile, bucket_name, 1800, reason=str(err_banner))
+                    err_diag = r"./temp_read\aistudio_error_diag.png"
+                    capture_tab_screenshot(client, tab_id, err_diag)
+                    return {
+                        "ok": False,
+                        "code": "AISTUDIO_ERROR_BANNER",
+                        "error": f"AI Studio error banner detected: {err_banner}",
+                        "error_banner": err_banner,
+                        "profile": leased_profile,
+                        "model": validated_model,
+                        "diagnostic_screenshot": err_diag,
+                        "recovery_attempts": recovery_attempts,
+                        "duration_seconds": round(time.time() - start_time, 1),
+                    }
+
+                if is_gen and empty_rerun_until is not None:
+                    empty_rerun_until = 0  # Retry has visibly started. Treat its next empty completion as final.
+                if cur_len == 0 and not is_gen and st_data.get("has_feedback_buttons"):
+                    if empty_rerun_until is None and recovery_attempts < max_recovery_retries:
+                        recovery_attempts += 1
+                        if _rerun_in_place():
+                            empty_rerun_until = time.time() + 8.0
+                            continue
+                    if empty_rerun_until is not None and time.time() < empty_rerun_until:
+                        continue
+                    return {
+                        "ok": False, "code": "EMPTY_MODEL_RESPONSE",
+                        "error": "AI Studio finished without returning answer text.",
+                        "profile": leased_profile, "model": validated_model,
+                        "recovery_attempts": recovery_attempts,
+                        "duration_seconds": round(time.time() - start_time, 1),
+                    }
+
+                # Extended 0-char stall -> NEVER reload a stateless Playground tab while High Thinking is actively generating!
+                # Only run non-destructive popup healing when generation is NOT active and no answer appeared.
+                if cur_len == 0 and not is_gen and (time.time() - last_activity_ts) >= stall_reload_sec and recovery_attempts < max_recovery_retries:
+                    recovery_attempts += 1
+                    _recover_mid_poll(f"0-char stall for >= {stall_reload_sec}s while idle", do_reload=False)
+                    last_activity_ts = time.time()
+                    continue
 
                 turn_active = (cur_answer_turns > baseline_answer_turns and has_answer) or (baseline_answer_turns == 0 and has_answer)
                 if turn_active and not is_gen and cur_len > 0:
@@ -1067,6 +1729,7 @@ def ask_ai_studio(
                         stable_count += 1
                         if stable_count >= 2:
                             print(f"\n[AIStudioSubagent] Generation complete! Harvesting rich output...")
+                            completed_cleanly = True
                             break
                     else:
                         last_length = cur_len
@@ -1075,15 +1738,51 @@ def ask_ai_studio(
                     last_length = cur_len
                     stable_count = 0
 
-            # Rich Harvest
+            # Rich Harvest (across ALL model turns after baseline_answer_turns)
             harvest_res = call_bridge_api(
                 "/command",
                 method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.harvestRichContent();"}},
+                payload={
+                    "action": "EVAL_DOM",
+                    "profile": profile_dir,
+                    "params": {"tabId": tab_id, "code": f"window.__agyStudio.harvestRichContent({baseline_answer_turns});"},
+                },
             )
             response_data = harvest_res.get("result") or {}
             raw_text = response_data.get("text", "")
             thoughts = response_data.get("thoughts")
+
+            # Detect account verification gate rendered inline as a model error turn
+            if re.search(r"must be verified before it can continue|aistudio\.google\.com/verify-account", raw_text or "", re.I):
+                if profile_lock_manager:
+                    profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
+                return {
+                    "ok": False,
+                    "code": "NEEDS_VERIFY",
+                    "error": f"Profile {profile_dir} requires one-time AI Studio verification: {(raw_text or '').strip()[:240]}",
+                    "profile": leased_profile,
+                    "model": validated_model,
+                    "duration_seconds": round(time.time() - start_time, 1),
+                }
+
+            # Truthful Empty-Harvest Failure: NEVER return ok: True with an empty answer!
+            if len((raw_text or "").strip()) == 0:
+                diag_path = r"./temp_read\aistudio_timeout_diag.png"
+                capture_tab_screenshot(client, tab_id, diag_path)
+                return {
+                    "ok": False,
+                    "code": "EMPTY_HARVEST_TIMEOUT",
+                    "error": (
+                        f"AI Studio timed out or harvested an empty answer after {round(time.time() - start_time, 1)}s "
+                        f"(completed={completed_cleanly}, last_generating={last_is_gen}, last_chars={last_length}). "
+                        f"Diagnostic screenshot saved to {diag_path}."
+                    ),
+                    "profile": leased_profile,
+                    "model": validated_model,
+                    "diagnostic_screenshot": diag_path,
+                    "recovery_attempts": recovery_attempts,
+                    "duration_seconds": round(time.time() - start_time, 1),
+                }
         else:
             response_data = {}
             raw_text = ""
@@ -1109,13 +1808,13 @@ def ask_ai_studio(
         # Save Output to File
         if not output_file:
             timestamp_slug = time.strftime("%Y%m%d_%H%M%S")
-            output_file = f"<BRAIN_ROOT>\\temp_read\\aistudio_response_{timestamp_slug}.md"
+            output_file = f"c:\\Users\\Flh\\Desktop\\brain\\temp_read\\aistudio_response_{timestamp_slug}.md"
 
         out_path = Path(output_file)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        report_content = f"# Google AI Studio Reasoning Output\n\n"
-        report_content += f"- **Model**: `{model_name}`\n"
+        report_content = f"# Google AI Studio Playground Output\n\n"
+        report_content += f"- **Model**: `{validated_model}`\n"
         report_content += f"- **Profile**: `{leased_profile}`\n"
         report_content += f"- **Duration**: `{duration}s`\n"
         if response_data.get("token_telemetry"):
@@ -1138,7 +1837,7 @@ def ask_ai_studio(
             "ok": True,
             "surface": surface_clean,
             "profile": leased_profile,
-            "model": model_name,
+            "model": validated_model,
             "duration_seconds": duration,
             "output_file": str(out_path),
             "text": raw_text,
@@ -1151,9 +1850,11 @@ def ask_ai_studio(
 
     finally:
         heartbeat.stop()
+        if tab_id and not keep_tab and not continue_chat:
+            reclaim_finished_tab(profile_dir, tab_id)
         if profile_lock_manager:
-            profile_lock_manager.release_profile_lease(leased_profile, agent_id=agent_id)
-            print(f"[AIStudioSubagent] Lease released on {leased_profile}.")
+            profile_lock_manager.release_profile_lease(leased_profile, agent_id=agent_id, surface="aistudio")
+            print(f"[AIStudioSubagent] Lease released on {leased_profile} (surface=aistudio).")
 
 
 # -----------------------------------------------------------------------------
@@ -1161,31 +1862,33 @@ def ask_ai_studio(
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Query Google AI Studio (2M Context & Full Platform) via authentic Chrome bridge.")
-    parser.add_argument("prompt", nargs="?", default="", help="Task prompt, query, or app description")
-    parser.add_argument("-f", "--files", nargs="*", default=[], help="Context files to bundle (codebase, logs, schemas)")
-    parser.add_argument("--profile", default="Profile 14", help="Target Chrome profile directory (default: 'Profile 14')")
-    parser.add_argument("--model", default="gemini-4-argon", help="Model to select (e.g. gemini-4-argon, gemini-3.8-flash, gemini-3.5-flash-lite)")
-    parser.add_argument("--system", default=None, help="System instructions for the model")
-    parser.add_argument("--surface", choices=["playground", "freeform", "apps", "build", "gallery", "my_apps", "library"], default="playground", help="Target AI Studio surface")
+    parser = argparse.ArgumentParser(description="Query Google AI Studio Playground (4 Argon / 4 Neon) via authentic Chrome bridge.")
+    parser.add_argument("prompt", nargs="?", default="", help="Task prompt or consulting query")
+    parser.add_argument("-f", "--files", nargs="*", default=[], help="Context files to bundle & upload via CDP")
+    parser.add_argument("--profile", default=None, help="Target Chrome profile (defaults to Waterfall Drain Tier 1 Alt Pool)")
+    parser.add_argument("--model", default="gemini-4-argon", help="Playground model: gemini-4-argon (default) or gemini-4-neon")
+    parser.add_argument("--thinking", choices=["High", "Medium", "Low"], default="High", help="Thinking Level (default: High)")
+    parser.add_argument("--max-output-tokens", type=int, default=800000, help="Maximum output tokens (default: 800000, max: 1048576)")
+    parser.add_argument("--search", choices=["on", "off"], default="off", help="Grounding with Google Search (default: off)")
+    parser.add_argument("--code-exec", choices=["on", "off"], default="off", help="Code execution toggle (default: off)")
+    parser.add_argument("--url-context", choices=["on", "off"], default="off", help="URL context toggle (default: off)")
+    parser.add_argument("--system", default=None, help="Inline system instructions for the model")
+    parser.add_argument("--system-skill", default=None, help="Persona name in .agents/gemini_skills/ or path to markdown system prompt")
+    parser.add_argument("--surface", choices=["playground", "freeform", "apps", "build", "gallery", "my_apps", "library"], default="playground", help="Playground only (/apps retired)")
     parser.add_argument("--get-code", action="store_true", help="Harvest <> Get code snippet from active Playground")
     parser.add_argument("--get-code-output", default=None, help="File path to save harvested <> Get code snippet")
-    parser.add_argument("--search-gallery", default=None, help="Search query to filter showcase apps in the Gallery")
-    parser.add_argument("--remix", default=None, help="Title of showcase app to Remix")
-    parser.add_argument("--remix-name", default=None, help="New name for remixed app")
-    parser.add_argument("--remix-desc", default=None, help="New description for remixed app")
-    parser.add_argument("--export-app", choices=["zip", "antigravity", "github"], default=None, help="Export app to .zip, Antigravity, or GitHub")
     parser.add_argument("--timeout", type=int, default=300, help="Max timeout seconds (default: 300)")
     parser.add_argument("-o", "--output", default=None, help="Path to save markdown output")
     parser.add_argument("--screenshot", default=None, help="Save diagnostic screenshot to file")
-    parser.add_argument("--session-id", default=None, help="Session identifier for multi-turn tracking")
+    parser.add_argument("--session-id", default=None, help="Session identifier for tracking")
     parser.add_argument("--continue-chat", action="store_true", help="Continue in existing chat turns instead of starting fresh")
+    parser.add_argument("--keep-tab", action="store_true", help="Keep the finished Playground tab active")
 
     args = parser.parse_args()
 
     default_prompt = args.prompt
     if not default_prompt and args.surface == "playground" and not args.get_code:
-        default_prompt = "Explain the core architectural advantage of Google AI Studio's 2M token context window."
+        default_prompt = "Explain the core architectural advantage of Google AI Studio's high context window."
 
     try:
         res = ask_ai_studio(
@@ -1194,6 +1897,12 @@ if __name__ == "__main__":
             preferred_profile=args.profile,
             model_name=args.model,
             system_instructions=args.system,
+            system_skill=args.system_skill,
+            thinking=args.thinking,
+            max_output_tokens=args.max_output_tokens,
+            search=(args.search == "on"),
+            code_exec=(args.code_exec == "on"),
+            url_context=(args.url_context == "on"),
             timeout_sec=args.timeout,
             output_file=args.output,
             screenshot_path=args.screenshot,
@@ -1201,12 +1910,8 @@ if __name__ == "__main__":
             surface=args.surface,
             get_code=args.get_code,
             get_code_output=args.get_code_output,
-            search_gallery=args.search_gallery,
-            remix_target=args.remix,
-            remix_name=args.remix_name,
-            remix_desc=args.remix_desc,
-            export_app=args.export_app,
             continue_chat=args.continue_chat,
+            keep_tab=args.keep_tab,
         )
         if res.get("ok"):
             print("\n" + "=" * 80)
@@ -1218,17 +1923,6 @@ if __name__ == "__main__":
             elif res.get("harvested_code"):
                 print("Harvested SDK Client Code:")
                 print(res["harvested_code"][:500] + ("..." if len(res["harvested_code"]) > 500 else ""))
-            elif res.get("generated_files"):
-                print("Generated Full-Stack Files:")
-                for gf in res["generated_files"][:10]:
-                    print(f"  - {gf}")
-            elif res.get("data", {}).get("search_results"):
-                sr = res["data"]["search_results"]
-                print(f"Discovered {sr.get('count', 0)} Showcase Apps for '{sr.get('query')}':")
-                for app in sr.get("apps", [])[:10]:
-                    print(f"  - {app.get('title')}: {' | '.join(app.get('tags', []))}")
-            elif res.get("data", {}).get("remix_status"):
-                print(f"Remix status: {res['data']['remix_status']}")
             print("=" * 80)
             if res.get("output_file"):
                 print(f"Delivered to: {res.get('output_file')}")

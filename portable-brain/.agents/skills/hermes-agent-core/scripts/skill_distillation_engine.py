@@ -213,7 +213,7 @@ def save_skill_and_sync(skill_dir: Path, skill_content: str) -> bool:
         import sys
         sync_script = skill_dir.parents[0] / "auto-skill" / "scripts" / "sync_catalog.py"
         if not sync_script.exists():
-            sync_script = Path(r"<BRAIN_ROOT>\.agents\skills\auto-skill\scripts\sync_catalog.py")
+            sync_script = Path(r"./.agents\skills\auto-skill\scripts\sync_catalog.py")
         if sync_script.exists():
             subprocess.run([sys.executable, str(sync_script)], check=False)
             print("🔄 Auto-Skill catalog updated automatically.")

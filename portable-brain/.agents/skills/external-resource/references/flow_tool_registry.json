@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "profiles": {
+    "Profile 14": {
+      "handle": "agent_profile_1",
+      "tier": "alternate",
+      "role": "pro_manager",
+      "enabled": true,
+      "priority": 1,
+      "app_url": "https://flow.google.com/project/YOUR_PROJECT_ID/tool/YOUR_TOOL_ID?mode=APP"
+    },
+    "Profile 18": {
+      "handle": "agent_profile_3",
+      "tier": "alternate",
+      "role": "pro_manager",
+      "enabled": true,
+      "priority": 2,
+      "app_url": null
+    },
+    "Profile 21": {
+      "handle": "agent_profile_6",
+      "tier": "alternate",
+      "role": "pro_manager",
+      "enabled": true,
+      "priority": 3,
+      "app_url": null
+    },
+    "Profile 16": {
+      "handle": "agent_user",
+      "tier": "daily_driver",
+      "role": "pro_manager",
+      "enabled": true,
+      "priority": 1,
+      "app_url": null
+    },
+    "Profile 8": {
+      "handle": "gglshtasd",
+      "tier": "daily_driver",
+      "role": "pro_manager",
+      "enabled": true,
+      "priority": 2,
+      "app_url": null
+    }
+  }
+}

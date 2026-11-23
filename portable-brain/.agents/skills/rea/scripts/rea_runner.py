@@ -96,6 +96,10 @@ def main():
     action = sys.argv[1].lower()
     extra_args = sys.argv[2:]
 
+    if action in ("--help", "-h", "help"):
+        print("Usage: python rea_runner.py [check|analyze-js|analyze-binary|inspect-apk|run] [args...]")
+        sys.exit(0)
+
     if action == "check":
         check_environment()
     elif action == "analyze-js":

@@ -9,7 +9,7 @@
 You are operating in a multi-folder workspace where this folder (`brain` or `mobile_brain`) is attached alongside an **active target project folder**.
 
 * **`brain` is Strictly an External Read-Only Knowledge & Skill Vault**:
-  * It contains universal architecture rules, system mistake anti-patterns, design standards (`slop.md`), multi-agent memory, and 12 universal powerhouse skills.
+  * It contains universal architecture rules, system mistake anti-patterns, design standards (`slop.md`), multi-agent memory, and 13 universal powerhouse skills.
   * **CRITICAL INVARIANT**: Under NO circumstances should you create, edit, delete, or rename files inside `brain/` unless the user explicitly orders: *"Update central brain context"*.
 * **All Work Belongs in the Active Target Project**:
   * All new code, refactored files, bug fixes, test scripts, and deliverables MUST be written exclusively inside the target project directory (or `<active-project>/temp_read/`).
@@ -31,7 +31,7 @@ Context files such as `resources.md`, `constraints.md`, and project context arch
 
 ## 3. Autonomous Skill Utilization & Directory Sitemap
 
-This repository contains 12 self-contained Universal Powerhouse Skills in `.agents/skills/`. Before writing code or proposing architecture, check if a skill governs your task domain:
+This repository contains 13 self-contained Universal Powerhouse Skills in `.agents/skills/`. Before writing code or proposing architecture, check if a skill governs your task domain:
 
 | Domain / Task Type | Skill Directory | Core Mandate & Procedures |
 |---|---|---|
@@ -45,7 +45,8 @@ This repository contains 12 self-contained Universal Powerhouse Skills in `.agen
 | **Multi-Agent Code Audit & Repair** | `.agents/skills/exhaustive-audit-and-repair/` | UMACAR: RTM traceability, anti-regression scanning against `mistakes.md`, bounded peer arbitration. |
 | **Persistent Memory & Compaction** | `.agents/skills/hermes-agent-core/` | SQLite + FTS5 hybrid recall, dialectical user modeling, session flush & transcript learning. |
 | **Internal Tooling, MCP & Extensions** | `.agents/skills/internal-tools/` | FastMCP/TypeScript MCP servers, Antigravity SDK tools, Chrome MV3 extensions, skill scaffolding. |
-| **Multi-Project Sync & Vault Mirroring** | `.agents/skills/full-sync/` | Bi-directional project skill sync, AST context promotion, `<VAULT_BACKUP_DIR>` vault mirroring. |
+| **Cross-Instance Task Offloading & Boards** | `.agents/skills/offload/` | Per-project `offload/` boards, Orchestrator <-> CLI worker status bars, bounded subagent/swarm execution. |
+| **Multi-Project Sync & Vault Mirroring** | `.agents/skills/full-sync/` | Bi-directional project skill sync, AST context promotion, `<AGENTIC_VAULT>` vault mirroring. |
 | **Skill Lifecycle & Discovery** | `.agents/skills/auto-skill/` | Dynamic registry, evaluation harness, and query selector. |
 
 ### How to Query Skills via CLI:
@@ -62,7 +63,7 @@ Always read the target skill's `SKILL.md` using your file viewing tool before ex
 
 * **Universal Skills** in `.agents/skills/` are cross-project compatible and safe to reference for any codebase.
 * **Project-Specific Skills** (archived in `project_skills/<project>/`) belong strictly to their designated project.
-  * An agent working in Project A must **NEVER** apply or copy skills belonging to Project B (e.g. no University-Portal university portal skills in game or audio projects).
+  * An agent working in Project A must **NEVER** apply or copy skills belonging to Project B (e.g. no SRM university portal skills in game or audio projects).
 * Keep each codebase self-contained. Read only the 1–2 files necessary to complete the task.
 
 ---

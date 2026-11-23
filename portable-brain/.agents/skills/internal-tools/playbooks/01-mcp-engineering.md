@@ -69,7 +69,7 @@ if __name__ == "__main__":
 
 ## 4. Multi-Cloud MCP Operations Guide
 
-Reference for all pre-configured cloud MCP servers in `<USER_HOME>\.gemini\config\mcp_config.json`:
+Reference for all pre-configured cloud MCP servers in `C:\Users\User\.gemini\config\mcp_config.json`:
 
 | Cloud Service | MCP Server Name | Primary Capabilities & Best Practices |
 |---|---|---|

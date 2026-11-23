@@ -8,7 +8,7 @@ trigger: model_decision
 
 Before interacting with cloud infrastructure:
 1. For master multi-project cloud credentials and accounts, read:
-`<BRAIN_ROOT>\resources.md`
-2. For project-specific endpoints and keys, consult `<BRAIN_ROOT>\project_map.md` and open the target project's local `context/resources.md`.
+`./resources.md`
+2. For project-specific endpoints and keys, consult `./project_map.md` and open the target project's local `context/resources.md`.
 
 Do not guess IP addresses or credentials.

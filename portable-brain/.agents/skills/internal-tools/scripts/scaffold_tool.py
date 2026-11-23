@@ -103,9 +103,9 @@ def main():
     if args.type == "skill":
         scope = "project" if args.project else "universal"
         if args.project:
-            target_dir = Path(f"<USER_HOME>/Desktop/{args.project}/.agents/skills/{clean_name}")
+            target_dir = Path(f"C:\Users\User\Desktop/{args.project}/.agents/skills/{clean_name}")
         else:
-            target_dir = Path(args.out or f"<BRAIN_ROOT>/.agents/skills/{clean_name}")
+            target_dir = Path(args.out or f"./.agents/skills/{clean_name}")
     else:
         target_dir = Path(args.out or clean_name)
 

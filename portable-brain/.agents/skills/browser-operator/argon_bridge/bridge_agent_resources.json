@@ -1,0 +1,15 @@
+{
+  "owned_tabs": {
+    "Profile 21": {
+      "1092173768": {
+        "owner": "aistudio_subagent",
+        "surface": "aistudio",
+        "task": "You are reviewing the **LIVE V4 Architecture** we just built",
+        "created_at": 1795470458.802787,
+        "last_seen": 1795470458.802787,
+        "url": "https://aistudio.google.com/prompts/new_chat?model=gemini-4-neon"
+      }
+    }
+  },
+  "launched_by_agent": {}
+}

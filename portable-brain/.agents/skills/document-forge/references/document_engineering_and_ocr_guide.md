@@ -259,4 +259,4 @@ for chunk in chunks:
 ## 7. Python Production Adapters
 
 For ready-to-use production adapters implementing the unified router, PPTX 16:9 layout engine, DOCX auto-fit table builder, and tracked changes engine, inspect:
-`file:///<BRAIN_ROOT>/temp_read/doc_adapters.py`
+`file:///./temp_read/doc_adapters.py`

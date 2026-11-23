@@ -57,7 +57,7 @@ We are architecting the **{subsystem_name}** subsystem for a high-concurrency, m
 
 def main():
     parser = argparse.ArgumentParser(description="Synthesize Google Spark / Gemini Deep Research Prompt")
-    parser.add_argument("--subsystem", type=str, default="University-Portal Batch Pre-Generation Engine", help="Subsystem name")
+    parser.add_argument("--subsystem", type=str, default="SRM Batch Pre-Generation Engine", help="Subsystem name")
     parser.add_argument("--output", type=Path, default=None, help="Output markdown path")
     args = parser.parse_args()
 

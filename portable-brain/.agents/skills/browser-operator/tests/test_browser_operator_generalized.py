@@ -75,6 +75,13 @@ class TestCLIParserCoverage(unittest.TestCase):
             ["hotkey", "Alt+c"],
             ["accelerator", "drive-upload"],
             ["upload", "file1.pdf", "--intercept", "--trigger", "Upload"],
+            ["upload", "file1.pdf", "--direct-cdp"],
+            ["xhr-spy", "--install"],
+            ["xhr-spy", "--status", "--filter", "submit"],
+            ["xhr-spy", "--clear", "--refresh-url", "/curricula/session/refresh"],
+            ["type-otp", "123456", "--no-auto-verify"],
+            ["type-otp", "--totp-secret", "JBSWY3DPEHPK3PXP", "--selector", ".ant-otp"],
+            ["optimize-pdf", "in.pdf", "-o", "out.pdf", "--max-height", "960", "--quality", "28"],
             ["dialog", "--dismiss"],
             ["logs", "--enable"],
             ["storage", "--type", "cookies"],
@@ -171,6 +178,7 @@ class TestGeneratedJavaScriptSyntax(unittest.TestCase):
             bo.build_resolve_element_js("2"),
             bo.build_resolve_element_js("#submit"),
             bo.build_resolve_element_js("Save", role="button", name="Save"),
+            bo.build_xhr_spy_install_js(),
         ]
         for idx, js in enumerate(scripts):
             proc = subprocess.run([node_bin, "--input-type=commonjs", "-e", f"new Function({json.dumps(js)})"], capture_output=True, text=True)
@@ -208,6 +216,52 @@ class TestBackwardCompatibilityExports(unittest.TestCase):
         finally:
             server.CONNECTED_CLIENTS.clear()
             server.CONNECTED_CLIENTS.update(orig_clients)
+
+
+class TestV31Primitives(unittest.TestCase):
+    def test_generate_totp_code_rfc6238(self):
+        code, rem = bo.generate_totp_code("JBSWY3DPEHPK3PXP")
+        self.assertEqual(len(code), 6)
+        self.assertTrue(code.isdigit())
+        self.assertGreaterEqual(rem, 1)
+        self.assertLessEqual(rem, 30)
+
+    def test_type_otp_busy_guard_skips_in_flight(self):
+        with mock.patch.object(bo, "eval_tab_js", return_value={"ok": True, "busy": True, "inputCount": 6}):
+            with mock.patch.object(bo, "cdp_send") as mock_cdp:
+                res = bo.perform_type_otp("Profile 7", 10, code="123456")
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["status"], "busy_in_flight")
+                mock_cdp.assert_not_called()
+
+    def test_type_otp_dispatches_char_by_char_cdp_events(self):
+        side_effects = [
+            {"ok": True, "busy": False, "inputCount": 6},
+            {"found": True, "busy": True, "disabled": False, "inViewport": True, "x": 100, "y": 200},
+        ]
+        with mock.patch.object(bo, "eval_tab_js", side_effect=side_effects):
+            with mock.patch.object(bo, "cdp_send") as mock_cdp:
+                res = bo.perform_type_otp("Profile 7", 10, code="654321", delay_ms=10)
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["status"], "auto_submitted")
+                chars = [c.args[1]["text"] for c in mock_cdp.call_args_list if c.args[0] == "Input.dispatchKeyEvent"]
+                self.assertEqual(chars, list("654321"))
+
+    def test_upload_direct_cdp_uses_dom_set_file_input_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample = Path(tmpdir) / "test.pdf"
+            sample.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            cdp_responses = [
+                {"ok": True},  # DOM.enable
+                {"ok": True, "result": {"root": {"nodeId": 1}}},  # DOM.getDocument
+                {"ok": True, "result": {"nodeId": 99}},  # DOM.querySelector
+                {"ok": True},  # DOM.setFileInputFiles
+            ]
+            with mock.patch.object(bo, "cdp_send", side_effect=cdp_responses) as mock_cdp:
+                res = bo.perform_upload("Profile 7", 10, [str(sample)], direct_cdp=True)
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["tier"], "direct-cdp")
+                self.assertEqual(mock_cdp.call_args_list[-1].args[0], "DOM.setFileInputFiles")
 
 
 if __name__ == "__main__":

@@ -4,10 +4,11 @@ Auto-Skill Dynamic Catalog Synchronizer
 Scans all available skills in Central Brain (.agents/skills/), extracts YAML frontmatter,
 identifies Universal vs. Project-Specific scopes, compiles the structured JSON registry,
 generates references/catalog.md, and dynamically patches auto-skill/SKILL.md between sentinel markers.
-Mirrors updates to <VAULT_BACKUP_DIR>\\skills\\auto-skill.
+Mirrors updates to D:\\agentic\\skills\\auto-skill.
 """
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -20,18 +21,70 @@ BRAIN_ROOT = BRAIN_SKILLS_DIR.parent.parent
 brain_project_skills = BRAIN_ROOT / "project_skills"
 
 
-USER_HOME = Path.home()
-BUILTIN_SKILLS_DIR = USER_HOME / ".gemini" / "antigravity" / "builtin" / "skills"
-CONFIG_SKILLS_DIR = USER_HOME / ".gemini" / "config" / "skills"
-CONFIG_SKILLS_JSON = USER_HOME / ".gemini" / "config" / "skills.json"
-VAULT_SKILLS_DIR = Path(r"<VAULT_BACKUP_DIR>\skills") if Path(r"<VAULT_BACKUP_DIR>").exists() else None
+def _to_host_path(raw: Any) -> Path:
+    """Translate Windows drive paths (C:\\...) to WSL /mnt/<drive>/... when running on POSIX."""
+    s = str(raw).strip().strip("\"'")
+    if os.name == "posix":
+        m = re.match(r"^([A-Za-z]):[/\\]*(.*)$", s)
+        if m:
+            drive, rest = m.group(1).lower(), m.group(2).replace("\\", "/")
+            mnt_base = Path(f"/mnt/{drive}")
+            if mnt_base.exists():
+                return mnt_base / rest if rest else mnt_base
+    return Path(s)
+
+
+def _infer_host_home(brain_root: Path) -> Path:
+    """Resolve Windows host home even inside WSL with custom HOME=.agy_pro2."""
+    if os.name == "posix":
+        parts = brain_root.resolve().parts
+        if len(parts) >= 5 and parts[1] == "mnt" and parts[3].lower() == "users":
+            cand = Path("/") / parts[1] / parts[2] / parts[3] / parts[4]
+            if cand.is_dir():
+                return cand
+    return Path.home()
+
+
+def safe_copytree(src: Path, dst: Path) -> None:
+    """Recursively copy directory tree ignoring DrvFs chmod/copystat permission errors."""
+    for root, dirs, files in os.walk(src):
+        rel = Path(root).relative_to(src)
+        target_dir = dst / rel
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            src_file = Path(root) / f
+            dst_file = target_dir / f
+            try:
+                shutil.copyfile(src_file, dst_file)
+            except Exception:
+                pass
+
+
+HOST_HOME = _infer_host_home(BRAIN_ROOT)
+USER_HOME = HOST_HOME
+BUILTIN_SKILLS_DIR = HOST_HOME / ".gemini" / "antigravity" / "builtin" / "skills"
+CONFIG_SKILLS_DIR = HOST_HOME / ".gemini" / "config" / "skills"
+CONFIG_SKILLS_JSON = HOST_HOME / ".gemini" / "config" / "skills.json"
+
+_vault_cand = _to_host_path(r"<AGENTIC_VAULT>\skills")
+_vault_base = _to_host_path(r"<AGENTIC_VAULT>")
+VAULT_SKILLS_DIR = _vault_cand if _vault_base.exists() else None
 
 SENTINEL_START = "<!-- SKILLS-CATALOG:START -->"
 SENTINEL_END = "<!-- SKILLS-CATALOG:END -->"
 
 
 # Explicit Project-Specific Mappings (Restricted scope in project_skills)
-PROJECT_SPECIFIC_MAP = {}
+PROJECT_SPECIFIC_MAP = {
+    "srm-student-portal-engineer": "FLH-ONE (SRM Learn)",
+    "srm-academia-portal-engineer": "FLH-ONE (SRM Academia)",
+    "appwrite-cloud-architect": "flh-music (Appwrite Backend)",
+    "audiophile-audio-engine": "flh-music (Web Audio DSP)",
+    "living-npc-and-causality-architect": "krpg / AWAKEN1 (NPC Causality)",
+    "narrative-world-architect": "krpg / AWAKEN1 (World Lore)",
+    "asset-studio-pro": "krpg / AWAKEN1 (Asset Forge)",
+    "poma-offline-engine": "PKREA (POMA Offline Disassembly)",
+}
 
 CATEGORY_MAP = {
     "Cognitive, Reasoning & Memory Architecture": [
@@ -54,11 +107,12 @@ CATEGORY_MAP = {
     "Compute, Internal Tooling & Frontier AI": [
         "external-resource",
         "internal-tools",
+        "offload",
         "web-search-orchestrator",
     ],
     "Project-Specific Domain Skills": [
-        "portal-engineer-example",
-        "portal-engineer-example",
+        "srm-student-portal-engineer",
+        "srm-academia-portal-engineer",
         "appwrite-cloud-architect",
         "audiophile-audio-engine",
         "living-npc-and-causality-architect",
@@ -124,6 +178,7 @@ def parse_skill_md(skill_path: Path) -> Dict[str, Any]:
 
 def scan_skills() -> List[Dict[str, Any]]:
     skills = []
+    universal_names = set()
     # 1. Universal Skills in Brain (.agents/skills)
     if BRAIN_SKILLS_DIR.exists():
         for item in sorted(BRAIN_SKILLS_DIR.iterdir()):
@@ -132,16 +187,19 @@ def scan_skills() -> List[Dict[str, Any]]:
                 if skill_md.exists():
                     info = parse_skill_md(skill_md)
                     skills.append(info)
+                    universal_names.update({item.name.casefold(), info["name"].casefold()})
 
     # 2. Project-Specific Skills in Brain (project_skills/<project>/<skill>)
     if brain_project_skills.exists():
         for proj_dir in sorted(brain_project_skills.iterdir()):
-            if proj_dir.is_dir():
+            if proj_dir.is_dir() and proj_dir.name != "_universal_candidates":
                 for item in sorted(proj_dir.iterdir()):
                     if item.is_dir():
                         skill_md = item / "SKILL.md"
                         if skill_md.exists():
                             info = parse_skill_md(skill_md)
+                            if {item.name.casefold(), info["name"].casefold()} & universal_names:
+                                continue
                             info["scope"] = f"Project: {proj_dir.name}"
                             info["target_project"] = proj_dir.name
                             skills.append(info)
@@ -200,9 +258,20 @@ def sync_to_antigravity(skills: List[Dict[str, Any]]):
             skill_path = Path(skill_info["path"]).parent
             if skill_path.exists() and skill_path.is_dir():
                 target_builtin = BUILTIN_SKILLS_DIR / skill_path.name
-                shutil.copytree(skill_path, target_builtin, dirs_exist_ok=True)
+                safe_copytree(skill_path, target_builtin)
                 target_config = CONFIG_SKILLS_DIR / skill_path.name
-                shutil.copytree(skill_path, target_config, dirs_exist_ok=True)
+                safe_copytree(skill_path, target_config)
+
+        # Also mirror to Path.home() / ".gemini" / "config" / "skills" if Path.home() != HOST_HOME
+        if Path.home() != HOST_HOME:
+            local_config_skills = Path.home() / ".gemini" / "config" / "skills"
+            local_config_skills.mkdir(parents=True, exist_ok=True)
+            for skill_info in skills:
+                if skill_info.get("scope") != "Universal":
+                    continue
+                skill_path = Path(skill_info["path"]).parent
+                if skill_path.exists() and skill_path.is_dir():
+                    safe_copytree(skill_path, local_config_skills / skill_path.name)
 
         # 2. Gather all skills in BUILTIN_SKILLS_DIR for JSON manifests
         all_builtin_meta = []
@@ -239,7 +308,7 @@ def sync_to_antigravity(skills: List[Dict[str, Any]]):
         print(f"  [!] Notice: Could not sync to Antigravity global config: {e}")
 
 
-def sync_catalog():
+def sync_catalog(mirror_antigravity: bool = False):
     print("[AutoSkill] Scanning skills across Central Brain...")
     skills = scan_skills()
     print(f"[AutoSkill] Found {len(skills)} verified skill(s).")
@@ -256,28 +325,30 @@ def sync_catalog():
     catalog_file.write_text(catalog_md, encoding="utf-8")
     print(f"  [+] Saved catalog: {catalog_file}")
 
-    # 3. Patch auto-skill/SKILL.md if present
-    skill_md_file = AUTO_SKILL_DIR / "SKILL.md"
-    if skill_md_file.exists():
-        content = skill_md_file.read_text(encoding="utf-8")
-        if SENTINEL_START in content and SENTINEL_END in content:
-            pattern = re.compile(f"{re.escape(SENTINEL_START)}.*?{re.escape(SENTINEL_END)}", re.DOTALL)
-            replacement = f"{SENTINEL_START}\n\n{generate_catalog_markdown(skills)}\n\n{SENTINEL_END}"
-            updated_content = pattern.sub(replacement, content)
-            skill_md_file.write_text(updated_content, encoding="utf-8")
-            print(f"  [+] Patched SKILL.md catalog table successfully with Scope indicators.")
+    # 3. Notice: auto-skill/SKILL.md front door is kept clean and lightweight (<= 6 KB);
+    # the 51-row table is preserved strictly in references/catalog.md and not embedded here.
 
-    # 4. Mirror to <VAULT_BACKUP_DIR>\\skills\\auto-skill
+    # 4. Mirror to D:\\agentic\\skills\\auto-skill
     if VAULT_SKILLS_DIR and VAULT_SKILLS_DIR.exists():
         vault_auto_skill = VAULT_SKILLS_DIR / "auto-skill"
-        shutil.copytree(AUTO_SKILL_DIR, vault_auto_skill, dirs_exist_ok=True)
-        print(f"  [+] Mirrored auto-skill to {vault_auto_skill}")
+        try:
+            safe_copytree(AUTO_SKILL_DIR, vault_auto_skill)
+            print(f"  [+] Mirrored auto-skill to {vault_auto_skill}")
+        except Exception as e:
+            print(f"  [!] Notice: Vault mirror skipped/partial: {e}")
 
-    # 5. Mirror to Antigravity Builtin & Config Skills for '/' Slash Command Discovery
-    sync_to_antigravity(skills)
+    # 5. Mirror to Antigravity Builtin & Config Skills ONLY if explicit opt-in flag is provided
+    if mirror_antigravity:
+        sync_to_antigravity(skills)
+    else:
+        print("  [i] Skipping ~/.gemini copy (pass --mirror-antigravity to opt-in).")
 
     print(f"[AutoSkill] Dynamic catalog synchronization complete! ({len(skills)} skills active)")
 
 
 if __name__ == "__main__":
-    sync_catalog()
+    import argparse
+    parser = argparse.ArgumentParser(description="Auto-Skill Dynamic Catalog Synchronizer")
+    parser.add_argument("--mirror-antigravity", action="store_true", help="Opt-in flag to copy universal skills to ~/.gemini/antigravity directories")
+    args = parser.parse_args()
+    sync_catalog(mirror_antigravity=args.mirror_antigravity)

@@ -7,6 +7,6 @@ trigger: model_decision
 # UI Design & Anti-Slop Guidelines
 
 Before designing or modifying frontend components, read:
-`<BRAIN_ROOT>\slop.md`
+`./slop.md`
 
 Ensure your designs strictly adhere to dark glassmorphism, responsive touch targets (>= 44px), and authentic casual tone across all projects.

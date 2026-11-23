@@ -99,14 +99,14 @@ def query_ui(query_str: str, json_mode: bool = False):
 def main():
     parser = argparse.ArgumentParser(description="Dynamic UI Resource & Archetype Selector (Mini Auto-Skill for UI)")
     parser.add_argument("query", nargs="?", default="", help="Search query or project UI requirement")
-    parser.add_argument("--project", type=str, default="", help="Project name (e.g. project-web, project-audio, sample-project, hi)")
+    parser.add_argument("--project", type=str, default="", help="Project name (e.g. flh-one, flh-music, krpg, hi)")
     parser.add_argument("--json", action="store_true", help="Output JSON format")
     args = parser.parse_args()
 
     project_map = {
-        "project-web": "saas dashboard high density student analytics mobile",
-        "project-audio": "mobile audio player touch workstation",
-        "sample-project": "game canvas hud webgl full bleed",
+        "flh-one": "saas dashboard high density student analytics mobile",
+        "flh-music": "mobile audio player touch workstation",
+        "krpg": "game canvas hud webgl full bleed",
         "hi": "standalone interactive novel widget",
         "cult_game": "canvas game hud narrative",
     }

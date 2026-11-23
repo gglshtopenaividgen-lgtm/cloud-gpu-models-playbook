@@ -5,7 +5,7 @@ gemini_deep_research.py - Autonomous Gemini Deep Research via Argon Bridge & Sha
 > ⛔ EXECUTION-FIRST MANDATE:
 > This is an executable CLI engine. NEVER call read_file or view_file on this script.
 > Always execute directly via run_command:
-> python <BRAIN_ROOT>\\.agents\\skills\\web-search-orchestrator\\scripts\\gemini_deep_research.py "<topic>" -o temp_read/report.md
+> python C:\\Users\\Flh\\Desktop\\brain\\.agents\\skills\\web-search-orchestrator\\scripts\\gemini_deep_research.py "<topic>" -o temp_read/report.md
 
 Features:
 1. Dynamic Shared Fleet Negotiation: Automatically picks the optimal IDLE Google One AI Premium profile
@@ -106,21 +106,31 @@ def run_autonomous_deep_research(
     output_path: Optional[str] = None,
     auto_clean: bool = True,
     timeout_sec: int = 900,
+    model: Optional[str] = None,
+    thinking: Optional[str] = None,
+    mode: str = "chat",
 ) -> Dict[str, Any]:
-    """Drives Deep Research on gemini.google.com autonomously via Argon Bridge and shared fleet."""
+    """Drives Deep Research ('4 Neon' High in Chat mode) or Task research ('4 Neon' High in Task mode) via Argon Bridge & shared fleet."""
     if not GeminiBrainDriver or not acquire_profile_lease:
         return {"ok": False, "error": f"Argon Bridge components not available at {BRIDGE_PATH}."}
 
-    agent_id = f"deep_research_{int(time.time() * 1000)}"
-    task_desc = f"Deep Research: {topic[:35]}"
+    mode_norm = (mode or "chat").strip().lower()
+    use_deep_research = (mode_norm == "chat")
+    target_model = model or "4 Neon"
+    target_thinking = (thinking or "High").title()
 
-    # 1. Acquire dynamic profile lease (auto-negotiates optimal idle profile across fleet if None)
+    agent_id = f"deep_research_{int(time.time() * 1000)}"
+    task_desc = f"{'Task Research' if mode_norm == 'task' else 'Deep Research'}: {topic[:35]}"
+
+    # 1. Acquire surface-scoped profile lease on gemini_web_neon bucket
     target_profile, lease_err = acquire_profile_lease(
         agent_id=agent_id,
         preferred_profile=profile,
         task=task_desc,
-        deep_research=True,
+        deep_research=use_deep_research,
         lease_seconds=timeout_sec,
+        surface="gemini_web",
+        bucket="gemini_web_neon",
     )
 
     if not target_profile:
@@ -146,7 +156,10 @@ def run_autonomous_deep_research(
     sid = None
 
     try:
-        print(f"[GeminiDeepResearch] Profile acquired: '{target_profile}' for task '{task_desc}'")
+        print(
+            f"[GeminiDeepResearch] Profile acquired: '{target_profile}' | Mode={mode_norm} | "
+            f"Model={target_model} ({target_thinking or 'N/A'}) | Task='{task_desc}'"
+        )
         print(f"[GeminiDeepResearch] Timeout: {timeout_sec}s | Auto-clean: {auto_clean}")
 
         driver = GeminiBrainDriver(default_profile=target_profile)
@@ -155,7 +168,10 @@ def run_autonomous_deep_research(
         res = driver.ask(
             session_id=sid,
             prompt=prompt,
-            deep_research=True,
+            deep_research=use_deep_research,
+            model=target_model,
+            thinking=target_thinking,
+            mode=mode_norm,
             check_usage=True,
             timeout_sec=timeout_sec,
         )
@@ -185,6 +201,9 @@ def run_autonomous_deep_research(
                 "session_id": sid,
                 "profile": target_profile,
                 "chat_id": chat_id,
+                "mode": res.get("mode", mode_norm),
+                "model": res.get("model", target_model),
+                "thinking": res.get("thinking", target_thinking),
                 "char_count": len(response_text),
                 "response": response_text,
                 "rich": rich_data,
@@ -244,7 +263,11 @@ def main():
     parser.add_argument("--topic", dest="topic_flag", default=None, help="Main research topic (flag)")
     parser.add_argument("--context", default="General multi-agent system engineering context.", help="Background context")
     parser.add_argument("--questions", "-q", nargs="+", default=[], help="Specific questions or technical vectors")
-    parser.add_argument("--profile", default=None, help="Target specific Chrome profile (e.g. 'Profile 14', 'Profile 13'); if omitted, auto-selects optimal idle profile")
+    parser.add_argument("--profile", default=None, help="Target specific Chrome profile (defaults to Waterfall Drain Tier 1 Alt Pool)")
+    parser.add_argument("--model", default="4 Neon", help="Target Gemini Web model (default: '4 Neon' High; 4 Hydrogen/4 Carbon are blocked)")
+    parser.add_argument("--thinking", default="High", choices=["Low", "Medium", "High"], help="Thinking level (default: High)")
+    parser.add_argument("--mode", default="chat", choices=["chat", "task"], help="Gemini segmented mode ('chat' = Deep Research, 'task' = parallel subagent Task research)")
+    parser.add_argument("--task", action="store_true", help="Shortcut for --mode task (parallel cloud subagent research on 4 Neon High)")
     parser.add_argument("--status", action="store_true", help="Display live profile fleet visibility, active agent leases, and usage telemetry")
     parser.add_argument("--output", "-o", default=None, help="Save markdown report to file path in temp_read/")
     parser.add_argument("--keep-chat", action="store_true", help="Keep the chat in the sidebar (do not auto-delete)")
@@ -266,6 +289,8 @@ def main():
         print(generate_prompt(topic, args.context, args.questions))
         return
 
+    effective_mode = "task" if getattr(args, "task", False) else args.mode
+
     # Execute autonomously by default
     result = run_autonomous_deep_research(
         topic=topic,
@@ -275,13 +300,18 @@ def main():
         output_path=args.output,
         auto_clean=not args.keep_chat,
         timeout_sec=args.timeout,
+        model=args.model,
+        thinking=args.thinking,
+        mode=effective_mode,
     )
 
     if args.json:
         print(json.dumps(result, indent=2))
     elif result.get("ok"):
         print("\n" + "=" * 80)
-        print(f" GEMINI DEEP RESEARCH DOSSIER (Profile: {result.get('profile')} | Duration: {result.get('duration_seconds')}s)")
+        res_model = (result.get("model") or args.model or "4 Hydrogen").upper()
+        res_mode = (result.get("mode") or effective_mode).upper()
+        print(f" GEMINI {res_model} [{res_mode}] RESEARCH DOSSIER (Profile: {result.get('profile')} | Duration: {result.get('duration_seconds')}s)")
         print("=" * 80)
         print(result.get("response"))
         print("=" * 80)

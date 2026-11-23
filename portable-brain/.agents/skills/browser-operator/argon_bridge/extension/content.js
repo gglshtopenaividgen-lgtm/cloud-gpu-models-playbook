@@ -12,7 +12,7 @@
   function detectAccountEmail() {
     if (!isGoogleAISurface) return null;
     const avatarEl = document.querySelector(
-      'a[aria-label*="Google Account:"], a[aria-label*="Google-Konto:"], img[alt*="@gmail.com"], [data-email]'
+      'a[aria-label*="Google Account:"], a[aria-label*="Google-Konto:"], img[alt*="@"], [data-email]'
     );
     if (avatarEl) {
       const aria = avatarEl.getAttribute("aria-label") || avatarEl.getAttribute("alt") || avatarEl.getAttribute("data-email") || "";

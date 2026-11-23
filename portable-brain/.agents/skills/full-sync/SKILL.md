@@ -1,105 +1,55 @@
 ---
 name: full-sync
-description: Universal multi-agent synchronization & context synthesis engine. Bi-directionally syncs skills between projects and brain, promotes universal context (ideas, mistakes, constraints, resources) via Markdown AST, mirrors to <VAULT_BACKUP_DIR>, and bootstraps workspaces.
-compatibility: Windows 11 PowerShell, Python 3.14+
-metadata:
-  version: 3.0.0
-  type: universal-skill
+description: "Universal multi-agent synchronization & context synthesis engine. Bi-directionally syncs skills between projects and brain, promotes universal context (ideas, mistakes, constraints, resources) via Markdown AST, mirrors to <AGENTIC_VAULT>, and bootstraps workspaces."
 ---
 
-# Full-Sync 3.0: Universal Master Synchronization & Context Synthesis Engine
+# Full-Sync 3.0: Universal Master Synchronization Engine
+
+> **Step-0 Project Overlay**: Before executing, check if `<active-project>/.agents/skill_overlays/full-sync.md` exists (via `python .agents/skills/auto-skill/scripts/resolve_skill_overlay.py --project <root> --skill full-sync`).
 
 > [!IMPORTANT]
-> ⛔ **EXECUTION-FIRST MANDATE (ZERO-PASSIVE-READING)**:
-> Bundled scripts in `scripts/` are **executable software tools**, NOT reading material.
-> When this skill is triggered, **EXECUTE the relevant script immediately** via `run_command`.
-> **STRICT PROHIBITION**: NEVER call `view_file` on scripts in `scripts/` or explain their source code to the user unless explicitly ordered to edit or debug the script itself.
-> Universal scripts can and must be executed from **ANY project workspace** by calling their absolute path:
-> `python <BRAIN_ROOT>\.agents\skills\full-sync\scripts\<script_name> ...`
-
-`full-sync` is the master operational heartbeat for the multi-agent ecosystem. It bridges the Central Brain (`<BRAIN_ROOT>`), project workspaces (e.g. `project-web`, `hi`, `sample-project`, `project-audio`, `custom_tools`, `sample-project`, `cult_game`, `sample-project`), and the permanent offline sovereign disaster-recovery vault (`<VAULT_BACKUP_DIR>`).
+> ⛔ **EXECUTION-FIRST MANDATE**: Scripts in `scripts/` are executable software tools, NOT documentation. Never ask the user to run them or read them passively. Execute immediately via shell commands. When invoking Windows binaries from WSL, append `< /dev/null`.
 
 ---
 
-## The 4 Pillars of Full-Sync 3.0
+## 1. The 5 Pillars of Full-Sync
 
-```mermaid
-flowchart TD
-    FS["full_sync.py"] --> P1["Pillar 1: Bi-directional Skill Sync<br>(skill_reconciler.py)"]
-    FS --> P2["Pillar 2: Universal Context Synthesis<br>(context_promoter.py)"]
-    FS --> P3["Pillar 3: <VAULT_BACKUP_DIR> Vault Mirror<br>(Permanent Offline Backup)"]
-    FS --> P4["Pillar 4: Autonomous Bootstrapper<br>(Hermes DB + Rules)"]
-
-    P1 --> ProjSkills["Project &lt;-&gt; Brain Backups"]
-    P1 --> AutoCatalog["Auto-Skill Catalog (66+ Skills)"]
-    P2 --> UniversalContext["brain/ideas.md, mistakes.md,<br>constraints.md, resources.md"]
-    P2 --> ProjectArchive["brain/projects/&lt;project&gt;/ Archive"]
-    P3 --> DVault["<VAULT_BACKUP_DIR> Backup"]
-    P4 --> ProjectWorkspace["Active Workspaces Hydrated"]
-```
-
-### Pillar 1: Bi-directional Skill Synchronization (`skill_reconciler.py`)
-- **Project Discovery**: Automatically maps all registered project directories from `project_map.md` and workspace roots.
-- **Merkle Tree Hashing**: Computes normalized SHA-256 hashes (with CRLF/LF normalization) over every skill folder to skip unnecessary writes.
-- **Bi-directional Flow**:
-  - `Project -> Brain Backup`: Automatically discovers any new or updated skill in `<project>/.agents/skills/<skill>/` and backs it up to `brain/project_skills/<project>/<skill>/`.
-  - `Brain -> Project Hydration`: If a registered project skill is missing from a project workspace, automatically hydrates it down from Central Brain.
-- **12-Universal-Skill Cap Guard**: Strictly preserves `brain/.agents/skills/` for the 12 core universal powerhouses. Non-core universal candidates are staged in `brain/project_skills/_universal_candidates/`.
-- **Automatic Catalog Regeneration**: Upon any skill modification, immediately triggers `auto-skill/scripts/sync_catalog.py`, keeping `skill_registry.json` and `catalog.md` 100% synchronized.
-
-### Pillar 2: Universal Context Synthesis & Promotion (`context_promoter.py`)
-- **Markdown AST Block Parsing**: Parses `ideas.md`, `mistakes.md`, `constraints.md`, and `resources.md` into discrete semantic blocks.
-- **Universal vs Local Semantic Classifier**:
-  - Automatically identifies cross-project invariants, cloud limits, runtime defects, security configurations, and architectural decisions.
-  - Distinguishes universal insights from hyper-local component styling (padding, color, margin, local route names).
-- **Persistent Signature Deduplication**: Stores SHA-256 signature and title hashes in `projects/.context_promotion_state.json` to guarantee 100% idempotent runs (0 duplicate entries appended on subsequent runs).
-- **Monotonic Anti-Wipe Guard**: Guarantees file size never decreases (`len(new_bytes) >= len(old_bytes)`) and commits changes atomically via `.tmp` replacement.
-- **Complete Project Archiving**: Archives all raw project context files into `brain/projects/<project>/`.
-
-### Pillar 3: Sovereign Disaster-Recovery Vault Backup (`sync_to_d_agentic.py`)
-- Mirrors all universal skills, project skills, rules, and living context files to `<VAULT_BACKUP_DIR>`.
-- Re-generates `master_agent_state.md` and `README.md` for 1-command cross-device restoration.
-
-### Pillar 4: Autonomous Project Bootstrapping (`bootstrap_hermes.py`)
-- Audits workspaces for `.hermes/project_memory.db`, `file_map.md`, and `AGENTS.md`.
-- Hydrates missing project infrastructure automatically using non-destructive sentinel blocks.
+| Pillar | Engine Script | Core Responsibility |
+|:---|:---|:---|
+| **1. Bi-directional Skill Sync** | `scripts/skill_reconciler.py` | Merkle SHA-256 diffs; backs up project skills to Brain; preserves 13 universal skills |
+| **2. Universal Context Synthesis**| `scripts/conversation_distiller.py`<br>`scripts/context_promoter.py` | Watermarked transcript distillation (`--ai-studio` rolling summarizer); AST heuristic promotion |
+| **3. Sovereign Vault Mirroring** | `scripts/sync_to_d_agentic.py` | Mirrors skills, context, and project archives to `<AGENTIC_VAULT>`; zero `~/.gemini/` pollution |
+| **4. Autonomous Bootstrapper** | `scripts/bootstrap_project.py` | Hydrates new project workspaces with Hermes memory databases and agent rules |
+| **5. Offload Message Boards** | `scripts/offload_manager.py` | Maintains project-scoped `offload/` directories and status boards |
 
 ---
 
-## Usage & Commands
+## 2. Invariants & Boundaries
 
-### 1. Full 4-Pillar Synchronize (Default)
-Run from any PowerShell prompt:
-```powershell
-python <BRAIN_ROOT>\.agents\skills\full-sync\scripts\full_sync.py
-```
+- **Universal Skill Preservation**: Canonical skills in `brain/.agents/skills/` are strictly limited to the 13 core powerhouses. Non-core universal candidates stage in `project_skills/_universal_candidates/`.
+- **Dry-Run Safety**: Always verify planned synchronization actions with `--dry-run` before modifying file trees.
+- **Sovereign Backup Invariant**: `<AGENTIC_VAULT>` is the sovereign disaster recovery vault. Vault sync never touches or mutates active workspace sources.
 
-### 2. Audit / Dry-Run Mode (Zero Disk Writes)
-Audit skill diffs and context promotions without mutating any files:
-```powershell
-python <BRAIN_ROOT>\.agents\skills\full-sync\scripts\full_sync.py --dry-run
-```
+---
 
-### 3. Targeted Pillar Operations
-```powershell
-# Sync only skills and auto-skill catalog
-python <BRAIN_ROOT>\.agents\skills\full-sync\scripts\full_sync.py --skills-only
+## 3. Core CLI Commands
 
-# Synthesize and promote context only
-python <BRAIN_ROOT>\.agents\skills\full-sync\scripts\full_sync.py --context-only
+```bash
+# 1. Preview full synchronization changes across all pillars
+python .agents/skills/full-sync/scripts/full_sync.py --project "<active_project>" --dry-run
 
-# Target a specific project workspace
-python <BRAIN_ROOT>\.agents\skills\full-sync\scripts\full_sync.py --project <USER_HOME>\Desktop\project-web
+# 2. Execute full synchronization across active project and Brain
+python .agents/skills/full-sync/scripts/full_sync.py --project "<active_project>"
 
-# Sync only the offline <VAULT_BACKUP_DIR> vault
-python <BRAIN_ROOT>\.agents\skills\full-sync\scripts\full_sync.py --vault-only
+# 3. Run incremental conversation distillation with AI Studio summarizer
+python .agents/skills/full-sync/scripts/conversation_distiller.py --project "<active_project>" --ai-studio
+
+# 4. Mirror all brain skills and context to <AGENTIC_VAULT> vault
+python scripts/sync_to_d_agentic.py
 ```
 
 ---
 
-## When to Run Full-Sync
+## 4. References & Architectural Guides
 
-- **At session start**: Ensures the active project has the latest skills and universal constraints.
-- **After authoring or editing a skill**: Automatically indexes the skill in `auto-skill` and backs it up to `project_skills/`.
-- **After solving complex bugs or making architectural decisions**: Promotes universal insights to Brain ledgers without manual copy-pasting.
-- **Before context compaction or switching machines**: Refreshes offline recovery snapshots in `<VAULT_BACKUP_DIR>`.
+- [Sync Architecture & Vault Mirroring Guide](references/sync_architecture_guide.md) — Comprehensive technical reference for Merkle hashing, conversation watermarking, and vault disaster recovery.

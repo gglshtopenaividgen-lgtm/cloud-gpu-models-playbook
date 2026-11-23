@@ -22,9 +22,169 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from stealth_input import dispatch_stealth_click, dispatch_stealth_type, RICH_HARVEST_JS
+try:
+    import popup_healer
+except ImportError:
+    popup_healer = None
 
 BRIDGE_URL = "http://127.0.0.1:9229"
 REGISTRY_PATH = Path(__file__).parent / "gemini_sessions_registry.json"
+LOCKS_FILE = Path(__file__).parent / "bridge_profile_locks.json"
+LOCKS_LOCK_FILE = Path(__file__).parent / "bridge_profile_locks.json.lock"
+
+try:
+    from filelock import FileLock, Timeout as FileLockTimeout
+    HAS_FILELOCK = True
+except ImportError:
+    HAS_FILELOCK = False
+    FileLock = None
+    FileLockTimeout = None
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def profile_lock_context(timeout: float = 10.0):
+    """Process-safe file lock around bridge_profile_locks.json to eliminate Windows NTFS race conditions."""
+    if HAS_FILELOCK and FileLock is not None:
+        lock = FileLock(str(LOCKS_LOCK_FILE), timeout=timeout)
+        try:
+            with lock:
+                yield
+        except Exception:
+            yield
+    else:
+        start = time.time()
+        acquired = False
+        fallback = Path(str(LOCKS_LOCK_FILE) + ".fallback")
+        while time.time() - start < timeout:
+            try:
+                fd = os.open(str(fallback), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(fd)
+                acquired = True
+                break
+            except (FileExistsError, OSError):
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if acquired and fallback.exists():
+                try:
+                    fallback.unlink()
+                except Exception:
+                    pass
+
+
+MODEL_SPECS: Dict[str, Dict[str, Any]] = {
+    "neon": {
+        "key": "neon",
+        "label": "4 Neon",
+        "test_id": "bard-mode-option-e6fa609c3fa255c0",
+        "supports_thinking": True,
+        "aliases": ("4 neon", "neon", "deeper analysis", "3.1 pro", "pro"),
+    },
+    "argon": {
+        "key": "argon",
+        "label": "4 Argon",
+        "test_id": "bard-mode-option-argon",
+        "supports_thinking": True,
+        "deprecated_on_web": True,
+        "aliases": ("4 argon", "argon", "code & analysis"),
+    },
+    "hydrogen": {
+        "key": "hydrogen",
+        "label": "4 Hydrogen",
+        "test_id": "bard-mode-option-56fdd199312815e2",
+        "supports_thinking": True,
+        "blocked": True,
+        "aliases": ("4 hydrogen", "hydrogen", "everyday help"),
+    },
+    "flash-lite": {
+        "key": "flash-lite",
+        "label": "3.5 Flash-Lite",
+        "test_id": "bard-mode-option-8c46e95b1a07cecc",
+        "supports_thinking": False,
+        "aliases": ("3.5 flash-lite", "flash-lite", "flash lite", "quick answers"),
+    },
+    "carbon": {
+        "key": "carbon",
+        "label": "4 Carbon",
+        "test_id": "bard-mode-option-upsell_MODE_CATEGORY_ULTRA",
+        "supports_thinking": True,
+        "blocked": True,
+        "aliases": ("4 carbon", "carbon", "most complex work"),
+    },
+}
+
+
+def resolve_model_spec(model: Optional[str] = None) -> Dict[str, Any]:
+    """Resolve user-friendly model strings ('4 Neon', 'neon', etc.) to canonical UI metadata."""
+    raw = (model or "4 Neon").strip()
+    low = raw.lower()
+    for spec in MODEL_SPECS.values():
+        if low == spec["key"] or low == spec["label"].lower() or any(a in low for a in spec["aliases"]):
+            return dict(spec)
+    return {
+        "key": low,
+        "label": raw,
+        "test_id": "",
+        "supports_thinking": True,
+        "aliases": (low,),
+    }
+
+
+def resolve_execution_route(
+    model: Optional[str] = None,
+    thinking: Optional[str] = None,
+    mode: str = "chat",
+    deep_research: bool = False,
+) -> Dict[str, Any]:
+    """
+    Canonical Gemini Web routing policy:
+    - All Gemini Web modes (Chat, Deep Research, Task) route to `4 Neon` + `High` Thinking.
+    - `4 Hydrogen` and `4 Carbon` are HARD BLOCKED in browser bridges.
+    - Legacy `4 Argon` requests on Gemini Web auto-route to `4 Neon` (4 Argon lives on AI Studio Playground).
+    """
+    mode_norm = (mode or "chat").strip().lower()
+    if mode_norm not in ("chat", "task"):
+        mode_norm = "chat"
+
+    # Deep research chip lives strictly inside Chat mode (+ -> More tools -> Deep research)
+    if deep_research and mode_norm != "chat":
+        mode_norm = "chat"
+
+    chosen_raw = (model or "4 Neon").strip()
+    spec = resolve_model_spec(chosen_raw)
+
+    if spec.get("blocked"):
+        raise ValueError(
+            f"Model '{spec['label']}' is blocked in browser bridges. "
+            "4 Hydrogen is reserved for local Antigravity coding and 4 Carbon requires Ultra. "
+            "Use '4 Neon' on Gemini Web or 'gemini-4-argon' / 'gemini-4-neon' on AI Studio Playground."
+        )
+
+    if spec.get("deprecated_on_web"):
+        print(
+            "[GeminiDriver] Note: 4 Argon was removed from Gemini Web; routing Gemini Web request to '4 Neon' High "
+            "(use AI Studio Playground for 4 Argon).",
+            file=sys.stderr,
+        )
+        spec = dict(MODEL_SPECS["neon"])
+
+    if not spec.get("supports_thinking", True):
+        resolved_thinking = ""
+    else:
+        t = (thinking or "High").strip()
+        resolved_thinking = t.title() if t else "High"
+
+    return {
+        "mode": mode_norm,
+        "model": spec["label"],
+        "model_key": spec["key"],
+        "test_id": spec.get("test_id", ""),
+        "supports_thinking": bool(spec.get("supports_thinking", True)),
+        "thinking": resolved_thinking,
+    }
 
 
 # Injected DOM helper library
@@ -70,6 +230,53 @@ window.__geminiDriver = {
             if (found) return found;
         }
         return this.findByText('gem-menu-item, [role="menuitem"], .mat-mdc-menu-item', regexPattern, document);
+    },
+    findSubmitButton: function() {
+        const isVisEnabled = (el) => {
+            if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const explicitSelectors = [
+            'button[aria-label="Send message"]',
+            'gem-icon-button.send-button button',
+            'button[aria-label*="Send" i]',
+            'button[aria-label*="Submit" i]',
+            'button[aria-label*="Start task" i]',
+            'button[aria-label*="Run" i]',
+            'button[data-test-id*="send" i]',
+            'button[data-test-id*="submit" i]',
+            'button.send-button',
+            'button.submit-button'
+        ];
+        for (const sel of explicitSelectors) {
+            const matches = Array.from(document.querySelectorAll(sel)).filter(isVisEnabled);
+            if (matches.length > 0) {
+                return matches[matches.length - 1];
+            }
+        }
+        // Fallback for Task Mode circular purple up-arrow button: rightmost enabled non-mic icon button in bottom half of composer
+        const box = document.querySelector('input-area-v2, .input-area-container, input-container, .text-input-field, form');
+        if (!box) return null;
+        const boxRect = box.getBoundingClientRect();
+        const midY = boxRect.top + boxRect.height * 0.4;
+        const excludedRe = /microphone|mic\b|voice|dictate|live|audio|upload|tool|attach|add\b|menu|picker|mode|neon|argon|hydrogen|flash|pro|expand|fullscreen|collapse|maximize|close|dismiss|stop/i;
+        const candidates = Array.from(box.querySelectorAll('button')).filter(btn => {
+            if (!isVisEnabled(btn)) return false;
+            const meta = ((btn.innerText || '') + ' ' + (btn.getAttribute('aria-label') || '') + ' ' + (btn.getAttribute('data-test-id') || '') + ' ' + (btn.getAttribute('mattooltip') || '')).trim();
+            if (excludedRe.test(meta)) return false;
+            const r = btn.getBoundingClientRect();
+            return r.bottom >= midY;
+        });
+        if (candidates.length === 0) return null;
+        candidates.sort((a, b) => {
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            if (Math.abs(rb.right - ra.right) > 4) return rb.right - ra.right;
+            return rb.bottom - ra.bottom;
+        });
+        return candidates[0];
     }
 };
 """
@@ -100,28 +307,42 @@ class GeminiBrainDriver:
         except Exception as e:
             print(f"[GeminiDriver] Warning saving registry: {e}", file=sys.stderr)
 
-    def _ensure_daemon_running(self) -> None:
-        """Ensures the local server.py bridge daemon is running, launching it if offline."""
-        try:
-            req = urllib.request.Request(f"{self.bridge_url}/command", data=json.dumps({"action": "PING"}).encode("utf-8"), headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=1.5):
-                return
-        except Exception:
-            pass
+    def ensure_bridge_running(self) -> bool:
+        """Checks GET /health -> GET /status with 5s timeout and 1 retry before launching server.py."""
+        for attempt in range(2):
+            for ep in ("/health", "/status"):
+                try:
+                    req = urllib.request.Request(f"{self.bridge_url}{ep}", method="GET")
+                    with urllib.request.urlopen(req, timeout=5.0) as resp:
+                        if resp.status == 200:
+                            return True
+                except urllib.error.HTTPError as e:
+                    if e.code == 404 and ep == "/health":
+                        continue
+                except Exception:
+                    break
+            if attempt == 0:
+                time.sleep(0.5)
 
         print("[GeminiDriver] Bridge daemon not detected. Launching server.py daemon...")
         server_py = Path(__file__).parent / "server.py"
         subprocess.Popen([sys.executable, str(server_py)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(15):
             time.sleep(0.4)
-            try:
-                req = urllib.request.Request(f"{self.bridge_url}/command", data=json.dumps({"action": "PING"}).encode("utf-8"), headers={"Content-Type": "application/json"})
-                with urllib.request.urlopen(req, timeout=1.0):
-                    print("[GeminiDriver] Bridge daemon started successfully.")
-                    return
-            except Exception:
-                pass
+            for ep in ("/health", "/status"):
+                try:
+                    req = urllib.request.Request(f"{self.bridge_url}{ep}", method="GET")
+                    with urllib.request.urlopen(req, timeout=2.0) as resp:
+                        if resp.status == 200:
+                            print("[GeminiDriver] Bridge daemon started successfully.")
+                            return True
+                except Exception:
+                    continue
         print("[GeminiDriver] Warning: Bridge daemon failed to respond within 6 seconds.", file=sys.stderr)
+        return False
+
+    def _ensure_daemon_running(self) -> None:
+        self.ensure_bridge_running()
 
     @staticmethod
     def _is_stale_tab_error(res_or_err: Any) -> bool:
@@ -167,16 +388,34 @@ class GeminiBrainDriver:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def re_discover_gemini_tab(self, profile: Optional[str] = None) -> Optional[int]:
-        """Calls LIST_TABS strictly for target profile, finds active gemini.google.com tab, and updates self.tab_id."""
+    def _get_owned_tab_ids(self, profile: Optional[str] = None) -> set[str]:
+        """Queries bridge GET /resources to obtain strictly agent-owned tab IDs for the profile."""
         prof = profile or self.default_profile
+        res = self._call_api_raw("/resources", payload=None, method="GET", timeout=5.0)
+        if not (isinstance(res, dict) and res.get("ok")):
+            return set()
+        owned_map = res.get("owned_tabs") or {}
+        if prof:
+            return {str(k) for k in (owned_map.get(prof) or {}).keys()}
+        out: set[str] = set()
+        for prof_tabs in owned_map.values():
+            if isinstance(prof_tabs, dict):
+                out.update(str(k) for k in prof_tabs.keys())
+        return out
+
+    def re_discover_gemini_tab(self, profile: Optional[str] = None) -> Optional[int]:
+        """Calls LIST_TABS strictly for target profile, finds an AGENT-OWNED gemini.google.com tab, and updates self.tab_id."""
+        prof = profile or self.default_profile
+        owned_ids = self._get_owned_tab_ids(profile=prof)
+        if not owned_ids:
+            return None
         payload: Dict[str, Any] = {"action": "LIST_TABS"}
         if prof:
             payload["profile"] = prof
         tabs_res = self._call_api_raw("/command", payload, profile=prof)
         gemini_tabs = [
             t for t in tabs_res.get("tabs", [])
-            if "gemini.google.com" in t.get("url", "")
+            if str(t.get("id")) in owned_ids and "gemini.google.com" in t.get("url", "")
         ]
         if not gemini_tabs:
             return None
@@ -215,14 +454,18 @@ class GeminiBrainDriver:
         return res
 
     def get_open_gemini_tab(self, profile: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Finds an existing open Gemini tab for the target profile."""
+        """Finds an existing AGENT-OWNED open Gemini tab for the target profile (never hijacks user tabs)."""
+        prof = profile or self.default_profile
+        owned_ids = self._get_owned_tab_ids(profile=prof)
+        if not owned_ids:
+            return None
         payload = {"action": "LIST_TABS"}
-        if profile:
-            payload["profile"] = profile
-        res = self._call_api_raw("/command", payload, profile=profile)
+        if prof:
+            payload["profile"] = prof
+        res = self._call_api_raw("/command", payload, profile=prof)
         gemini_tabs = [
             t for t in res.get("tabs", [])
-            if "gemini.google.com" in t.get("url", "")
+            if str(t.get("id")) in owned_ids and "gemini.google.com" in t.get("url", "")
         ]
         if not gemini_tabs:
             return None
@@ -301,7 +544,13 @@ class GeminiBrainDriver:
     def get_usage_limit(self, profile: Optional[str] = None) -> Dict[str, Any]:
         """Checks live Gemini usage limits in a clean background tab (gemini.google.com/usage)."""
         prof = profile or self.default_profile or "Profile 14"
-        open_payload = {"action": "OPEN_TAB", "params": {"url": "https://gemini.google.com/usage", "active": False}}
+        open_payload = {
+            "action": "OPEN_TAB",
+            "owner": "gemini_usage_check",
+            "surface": "gemini_web",
+            "agent_guarded": True,
+            "params": {"url": "https://gemini.google.com/usage", "active": False},
+        }
         if prof:
             open_payload["profile"] = prof
 
@@ -376,7 +625,7 @@ class GeminiBrainDriver:
                         usage_data["should_rotate"] = True
                     break
         finally:
-            close_payload = {"action": "CLOSE_TAB", "params": {"tabId": tab_id}}
+            close_payload = {"action": "CLOSE_TAB", "agent_guarded": True, "params": {"tabId": tab_id}}
             if prof:
                 close_payload["profile"] = prof
             self._call_api("/command", close_payload, profile=prof)
@@ -387,7 +636,7 @@ class GeminiBrainDriver:
         """Captures a screenshot of the tab via CDP and saves to disk."""
         out_p = Path(save_path)
         if not out_p.is_absolute():
-            out_p = Path("<BRAIN_ROOT>") / out_p
+            out_p = Path("./") / out_p
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
         prof = profile or self.default_profile
@@ -456,6 +705,18 @@ class GeminiBrainDriver:
         except Exception:
             return False
 
+    def _nudge_compositor(self, tab_id: int, profile: Optional[str] = None) -> None:
+        """Triggers a tiny off-screen compositor paint so occluded/minimized tabs render Angular overlays without stealing focus."""
+        try:
+            self.call_cdp(
+                tab_id,
+                "Page.captureScreenshot",
+                {"format": "jpeg", "quality": 1, "clip": {"x": 0, "y": 0, "width": 10, "height": 10, "scale": 1}},
+                profile=profile,
+            )
+        except Exception:
+            pass
+
     def wait_for_page_ready(
         self,
         tab_id: int,
@@ -494,7 +755,10 @@ class GeminiBrainDriver:
             }
         }
 
-        // 2. Check document.readyState
+        // 2. Check auth redirect & document.readyState
+        if (window.location.href.includes('accounts.google.com') || /\/signin/i.test(window.location.pathname)) {
+            return { ready: false, needs_reauth: true, url: window.location.href };
+        }
         const readyState = document.readyState;
         if (readyState !== 'complete') {
             return { ready: false, stage: 'document_loading', readyState, dismissedModal };
@@ -539,6 +803,13 @@ class GeminiBrainDriver:
                 if isinstance(res, dict):
                     data = res.get("result") if res.get("ok") and isinstance(res.get("result"), dict) else res
                     last_res = data
+                    if data.get("needs_reauth"):
+                        return {
+                            "ready": False,
+                            "needs_reauth": True,
+                            "url": data.get("url"),
+                            "elapsed": round(time.time() - start_ts, 2),
+                        }
                     if data.get("ready"):
                         return {
                             "ready": True,
@@ -555,21 +826,124 @@ class GeminiBrainDriver:
             "last_state": last_res,
         }
 
-    def ensure_model_and_thinking(
+    def ensure_execution_mode(
         self,
         tab_id: int,
-        model: str = "4 Argon",
-        thinking: str = "High",
+        mode: str = "chat",
         profile: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Ensures the Gemini Web UI is set to the target model (default '4 Argon')
-        and thinking level ('Low', 'Medium', 'High').
-        Uses trusted CDP mouse clicks for opening picker, selecting model,
-        and expanding the Thinking level sub-menu.
+        Ensures Gemini Web UI is on the target segmented mode ('chat' or 'task')
+        via `.gem-segmented-button-action` buttons.
+        """
+        prof = profile or self.default_profile
+        target_mode = (mode or "chat").strip().lower()
+        if target_mode not in ("chat", "task"):
+            return {"ok": False, "error": f"Unsupported mode '{mode}'. Use 'chat' or 'task'."}
+
+        probe_mode_js = f"""
+        return (() => {{
+            const isVis = (el) => {{
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+            }};
+            const btns = Array.from(document.querySelectorAll('.gem-segmented-button-action')).filter(isVis);
+            const modes = btns.map(b => {{
+                const wrap = b.closest('.gem-segmented-button');
+                return {{
+                    label: (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase(),
+                    selected: Boolean(wrap && wrap.classList.contains('gem-segmented-button-selected')),
+                }};
+            }});
+            const targetBtn = btns.find(b => (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase() === '{target_mode}');
+            const already = Boolean(targetBtn && targetBtn.closest('.gem-segmented-button')?.classList.contains('gem-segmented-button-selected'));
+            return {{
+                hasToggle: btns.length > 0,
+                hasTarget: Boolean(targetBtn),
+                alreadySelected: already,
+                modes: modes,
+            }};
+        }})()
+        """
+        raw = self.execute_js(tab_id, probe_mode_js, profile=prof)
+        st = raw.get("result") if isinstance(raw, dict) and raw.get("ok") and isinstance(raw.get("result"), dict) else {}
+
+        if not st.get("hasToggle"):
+            if target_mode == "chat":
+                return {"ok": True, "mode": "chat", "already_set": True, "note": "mode_toggle_absent_assume_chat"}
+            return {"ok": False, "error": "Segmented Chat/Task toggle not visible on current Gemini page (Task mode only available on new/zero-state composer)"}
+
+        if st.get("alreadySelected"):
+            return {"ok": True, "mode": target_mode, "already_set": True, "modes": st.get("modes")}
+
+        if not st.get("hasTarget"):
+            return {"ok": False, "error": f"Target mode '{target_mode}' button not found in toggle", "modes": st.get("modes")}
+
+        switch_js = f"""
+        return (async () => {{
+            const bd = document.querySelector('.cdk-overlay-backdrop');
+            if (bd) bd.click();
+            const isVis = (el) => {{
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+            }};
+            const btns = Array.from(document.querySelectorAll('.gem-segmented-button-action')).filter(isVis);
+            const targetBtn = btns.find(b => (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase() === '{target_mode}');
+            if (!targetBtn) return {{ ok: false, error: 'target button disappeared' }};
+            targetBtn.click();
+            await new Promise(r => setTimeout(r, 450));
+            const wrap = targetBtn.closest('.gem-segmented-button');
+            const selected = Boolean(wrap && wrap.classList.contains('gem-segmented-button-selected'));
+            return {{ ok: selected, mode: '{target_mode}', selected: selected }};
+        }})()
+        """
+        sw_raw = self.execute_js(tab_id, switch_js, profile=prof)
+        sw = sw_raw.get("result") if isinstance(sw_raw, dict) and sw_raw.get("ok") and isinstance(sw_raw.get("result"), dict) else {}
+        if sw.get("ok"):
+            time.sleep(0.3)
+            return {"ok": True, "mode": target_mode, "already_set": False}
+
+        time.sleep(0.4)
+        recheck = self.execute_js(tab_id, probe_mode_js, profile=prof)
+        re_st = recheck.get("result") if isinstance(recheck, dict) and recheck.get("ok") and isinstance(recheck.get("result"), dict) else {}
+        if re_st.get("alreadySelected"):
+            return {"ok": True, "mode": target_mode, "already_set": False}
+
+        return {"ok": False, "error": f"Failed to switch Gemini composer to '{target_mode}' mode", "state": sw or re_st}
+
+    def ensure_model_and_thinking(
+        self,
+        tab_id: int,
+        model: Optional[str] = None,
+        thinking: Optional[str] = None,
+        mode: str = "chat",
+        profile: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Ensures the Gemini Web UI is set to the target segmented mode ('chat' or 'task'),
+        model ('4 Argon', '4 Hydrogen', etc.), and thinking level ('Low', 'Medium', 'High').
+        In 'task' mode (or on Flash-Lite), Thinking level is skipped because no Thinking
+        submenu exists in Gemini's Task composer.
         """
         ready_info = self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=profile)
         if not ready_info.get("ready"):
+            if ready_info.get("needs_reauth"):
+                try:
+                    import profile_lock_manager
+                    if profile or self.default_profile:
+                        profile_lock_manager.mark_profile_needs_reauth(profile or self.default_profile, "gemini_web")
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "code": "NEEDS_REAUTH",
+                    "error": f"Profile '{profile or self.default_profile}' redirected to sign-in ({ready_info.get('url')}). Manual sign-in required.",
+                    "ready_info": ready_info,
+                }
             return {
                 "ok": False,
                 "error": "Page or model picker button did not become ready within 25s",
@@ -577,12 +951,25 @@ class GeminiBrainDriver:
             }
 
         prof = profile or self.default_profile
-        model_norm = "argon" if "argon" in model.lower() else model.strip().lower()
-        thinking_norm = (thinking or "High").strip().lower()
+        route = resolve_execution_route(model=model, thinking=thinking, mode=mode, deep_research=False)
+        mode_norm = route["mode"]
+        model_norm = route["model_key"]
+        model_test_id = route["test_id"]
+        thinking_norm = route["thinking"].lower()
+
+        mode_res = self.ensure_execution_mode(tab_id, mode=mode_norm, profile=prof)
+        if not mode_res.get("ok"):
+            return {
+                "ok": False,
+                "error": mode_res.get("error", f"Could not switch to mode '{mode_norm}'"),
+                "mode_result": mode_res,
+            }
 
         # Step 1: Check if already set
         check_js = r"""
         return (async () => {
+            const bd = document.querySelector('.cdk-overlay-backdrop');
+            if (bd) bd.click();
             let btn = document.querySelector(
                 'button[data-test-id="bard-mode-menu-button"], button.input-area-switch, button[aria-label*="mode picker" i], button[aria-label*="picker" i]'
             );
@@ -611,7 +998,7 @@ class GeminiBrainDriver:
             const targetModelKey = '""" + model_norm + r"""';
             const targetThinking = '""" + thinking_norm + r"""';
 
-            const hasModel = ariaLower.includes('currently ' + targetModelKey) || firstLineLower === targetModelKey;
+            const hasModel = ariaLower.includes('currently ' + targetModelKey) || ariaLower.includes(targetModelKey) || firstLineLower.includes(targetModelKey) || lines.some(l => l.toLowerCase() === targetModelKey);
             const hasThinking = !targetThinking || (
                 targetThinking === 'low'
                     ? (!ariaLower.includes('high') && !ariaLower.includes('medium') && !lines.some(l => l.toLowerCase() === 'high' || l.toLowerCase() === 'medium'))
@@ -640,14 +1027,15 @@ class GeminiBrainDriver:
             """
             zs_res = self.execute_js(tab_id, zs_js, profile=prof)
             if zs_res and zs_res.get("result", {}).get("isZeroState"):
-                print(f"[GeminiDriver] UI is in zero-state on {prof or 'active'} (account active tier: {model}). Ready for prompt.")
+                print(f"[GeminiDriver] UI is in zero-state on {prof or 'active'} (target: {route['model']} | mode: {mode_norm}). Ready for prompt.")
                 return {
                     "ok": True,
                     "already_set": True,
                     "zero_state": True,
-                    "model": model,
-                    "thinking": thinking,
-                    "current_text": f"{model} (Zero-State Default)",
+                    "mode": mode_norm,
+                    "model": route["model"],
+                    "thinking": route["thinking"],
+                    "current_text": f"{route['model']} (Zero-State Default)",
                     "aria_label": "Zero-State"
                 }
             return {"ok": False, "error": "Model picker button not found in DOM"}
@@ -656,78 +1044,127 @@ class GeminiBrainDriver:
             return {
                 "ok": True,
                 "already_set": True,
+                "mode": mode_norm,
+                "model": route["model"],
+                "thinking": route["thinking"],
                 "current_text": st.get("text"),
                 "aria_label": st.get("aria")
             }
 
         # Step 2: Open picker dropdown via trusted CDP mouse click
         picker_cx, picker_cy = st["cx"], st["cy"]
-        self._cdp_mouse_click(tab_id, picker_cx, picker_cy, profile=prof)
-        time.sleep(0.5)
-
-        # Step 3: Scan overlay items and handle model + thinking selection
         inspect_items_js = r"""
         return (() => {
-            const items = Array.from(document.querySelectorAll('gem-menu-item, [role="menuitem"], [role="menuitemradio"]')).map(el => {
+            const items = Array.from(document.querySelectorAll('gem-menu-item, [role="menuitem"], [role="menuitemradio"], button[data-test-id^="bard-mode-option-"]')).map(el => {
                 const r = el.getBoundingClientRect();
                 return {
-                    text: (el.innerText || '').trim().replace('\n', ' '),
+                    text: (el.innerText || '').trim().replace(/\n+/g, ' '),
+                    testId: el.getAttribute('data-test-id') || '',
                     tag: el.tagName,
                     role: el.getAttribute('role'),
+                    disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true' || el.classList.contains('disabled')),
                     cx: Math.round(r.left + r.width / 2),
                     cy: Math.round(r.top + r.height / 2),
                     w: r.width,
                     h: r.height,
-                    selected: el.classList.contains('selected') || el.getAttribute('aria-selected') === 'true'
+                    selected: el.classList.contains('selected') || el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-checked') === 'true'
                 };
             });
             return items;
         })()
         """
+
+        self.execute_js(
+            tab_id,
+            "const bd = document.querySelector('.cdk-overlay-backdrop'); if (bd) bd.click(); const btn = document.querySelector('button[data-test-id=\"bard-mode-menu-button\"], button.input-area-switch'); if (btn) btn.click();",
+            profile=prof,
+        )
+        time.sleep(0.45)
         raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
         items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
 
         if not items:
-            # Fallback to direct DOM .click() to bypass DPR scaling offsets
-            self.execute_js(tab_id, "const btn = document.querySelector('button[data-test-id=\"bard-mode-menu-button\"], button.input-area-switch'); if (btn) btn.click();", profile=prof)
-            time.sleep(0.5)
+            self._nudge_compositor(tab_id, profile=prof)
+            time.sleep(0.2)
             raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
             items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
 
         if not items:
             self._cdp_mouse_click(tab_id, picker_cx, picker_cy, profile=prof)
-            time.sleep(0.5)
+            time.sleep(0.35)
+            self._nudge_compositor(tab_id, profile=prof)
+            time.sleep(0.2)
             raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
             items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
 
         if not items:
             return {"ok": False, "error": "Model picker overlay menu did not open"}
 
-        # 3a. Select 4 Argon if not selected
-        argon_item = next((it for it in items if "argon" in it["text"].lower()), None)
-        if argon_item and not argon_item.get("selected") and argon_item.get("w", 0) > 0:
-            self._cdp_mouse_click(tab_id, argon_item["cx"], argon_item["cy"], profile=prof)
+        # 3a. Select requested model if not selected
+        target_model_item = next(
+            (
+                it for it in items
+                if (model_test_id and it.get("testId") == model_test_id)
+                or (model_norm and model_norm in it["text"].lower())
+            ),
+            None,
+        )
+        if not target_model_item:
+            available_texts = [it["text"] for it in items]
+            self.execute_js(tab_id, "const bd = document.querySelector('.cdk-overlay-backdrop'); if (bd) bd.click(); else document.body.click();", profile=prof)
+            return {
+                "ok": False,
+                "error": f"Model '{route['model']}' not available in {mode_norm} mode picker",
+                "available_items": available_texts,
+            }
+
+        if target_model_item.get("disabled"):
+            low_txt = target_model_item["text"].lower()
+            is_limit = any(k in low_txt for k in ("limit", "reset", "reached", "quota", "unavailable"))
+            self.execute_js(tab_id, "const bd = document.querySelector('.cdk-overlay-backdrop'); if (bd) bd.click();", profile=prof)
+            return {
+                "ok": False,
+                "rate_limited": is_limit,
+                "message": target_model_item["text"],
+                "error": f"Model '{route['model']}' option is disabled: {target_model_item['text']}",
+            }
+
+        if not target_model_item.get("selected") and target_model_item.get("w", 0) > 0:
+            click_model_js = f"""
+            (() => {{
+                const items = Array.from(document.querySelectorAll('gem-menu-item, [role="menuitem"], [role="menuitemradio"], button[data-test-id^="bard-mode-option-"]'));
+                const el = items.find(e =>
+                    ('{model_test_id}' && e.getAttribute('data-test-id') === '{model_test_id}')
+                    || (e.innerText || '').toLowerCase().includes('{model_norm}')
+                );
+                if (el) el.click();
+            }})()
+            """
+            self.execute_js(tab_id, click_model_js, profile=prof)
             time.sleep(0.5)
-            raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
-            items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
-            if not items:
-                self._cdp_mouse_click(tab_id, picker_cx, picker_cy, profile=prof)
-                time.sleep(0.5)
+            if thinking_norm:
                 raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
                 items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
+                if not items:
+                    self.execute_js(
+                        tab_id,
+                        "const btn = document.querySelector('button[data-test-id=\"bard-mode-menu-button\"], button.input-area-switch'); if (btn) btn.click();",
+                        profile=prof,
+                    )
+                    time.sleep(0.45)
+                    raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
+                    items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
 
-        # 3b. Expand "Thinking level" sub-menu if thinking requested
+        # 3b. Expand "Thinking level" sub-menu ONLY if thinking requested (Chat mode + supporting model)
         thinking_menu_btn = None
-        used_native_argon = False
+        used_native_thinking = False
         if thinking_norm:
             thinking_menu_btn = next((it for it in items if "thinking level" in it["text"].lower()), None)
             if thinking_menu_btn and thinking_menu_btn.get("w", 0) > 0:
-                # Dispatch CDP click and mouseenter/mouseover DOM events to guarantee submenu expansion
-                self._cdp_mouse_click(tab_id, thinking_menu_btn["cx"], thinking_menu_btn["cy"], profile=prof)
                 self.execute_js(tab_id, """
                 (() => {
                     const items = Array.from(document.querySelectorAll('gem-menu-item, [role="menuitem"]'));
-                    const tl = items.find(el => el.innerText.toLowerCase().includes('thinking level'));
+                    const tl = items.find(el => (el.innerText || '').toLowerCase().includes('thinking level'));
                     if (tl) {
                         tl.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
                         tl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
@@ -739,25 +1176,29 @@ class GeminiBrainDriver:
                 raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
                 items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
 
+                if not any(it["text"].lower().startswith(thinking_norm) and it.get("w", 0) > 0 for it in items):
+                    self._cdp_mouse_click(tab_id, thinking_menu_btn["cx"], thinking_menu_btn["cy"], profile=prof)
+                    time.sleep(0.4)
+                    raw_items = self.execute_js(tab_id, inspect_items_js, profile=prof)
+                    items = raw_items.get("result") if isinstance(raw_items, dict) and raw_items.get("ok") and isinstance(raw_items.get("result"), list) else []
+
             # Find matching target thinking item (must have w > 0, h > 0)
             target_item = next(
                 (it for it in items if it["text"].lower().startswith(thinking_norm) and it.get("w", 0) > 0),
                 None
             )
             if target_item:
-                self._cdp_mouse_click(tab_id, target_item["cx"], target_item["cy"], profile=prof)
                 self.execute_js(tab_id, f"""
                 (() => {{
                     const items = Array.from(document.querySelectorAll('gem-menu-item, [role="menuitem"], [role="menuitemradio"]'));
-                    const it = items.find(el => el.innerText.toLowerCase().startsWith('{thinking_norm}') && el.getBoundingClientRect().width > 0);
+                    const it = items.find(el => (el.innerText || '').trim().toLowerCase().startsWith('{thinking_norm}') && el.getBoundingClientRect().width > 0);
                     if (it) it.click();
                 }})()
                 """, profile=prof)
                 time.sleep(0.5)
-            elif argon_item and (argon_item.get("selected") or argon_item.get("w", 0) > 0):
-                # In zero-state / compact mode picker, Argon is selected and has native deep reasoning active
-                used_native_argon = True
-                print(f"[GeminiDriver] Note: Thinking sub-menu not present in zero-state UI; proceeding with Argon native reasoning.")
+            elif target_model_item and (target_model_item.get("selected") or target_model_item.get("w", 0) > 0):
+                used_native_thinking = True
+                print(f"[GeminiDriver] Note: Thinking sub-menu not present; proceeding with {route['model']} native reasoning.")
             else:
                 available_texts = [it["text"] for it in items]
                 self.execute_js(tab_id, "document.body.click();", profile=prof)
@@ -780,29 +1221,36 @@ class GeminiBrainDriver:
             const aria = (picker.getAttribute('aria-label') || '').trim();
             const ariaLower = aria.toLowerCase();
             const textLower = text.toLowerCase();
+            const targetModelKey = '""" + model_norm + r"""';
+            const targetThinking = '""" + thinking_norm + r"""';
             return {
                 hasBtn: true,
                 text: text,
                 aria: aria,
-                hasArgon: ariaLower.includes('argon') || textLower.includes('argon'),
-                hasThinking: '""" + thinking_norm + r"""' === 'low' ? (!ariaLower.includes('high') && !ariaLower.includes('medium') && !textLower.includes('high') && !textLower.includes('medium')) : ('""" + thinking_norm + r"""' ? (ariaLower.includes('""" + thinking_norm + r"""') || textLower.includes('""" + thinking_norm + r"""')) : true)
+                hasModel: ariaLower.includes(targetModelKey) || textLower.includes(targetModelKey),
+                hasThinking: !targetThinking ? true : (
+                    targetThinking === 'low'
+                        ? (!ariaLower.includes('high') && !ariaLower.includes('medium') && !textLower.includes('high') && !textLower.includes('medium'))
+                        : (ariaLower.includes(targetThinking) || textLower.includes(targetThinking))
+                )
             };
         })()
         """
         raw_v = self.execute_js(tab_id, verify_js, profile=prof)
         v = raw_v.get("result") if isinstance(raw_v, dict) and raw_v.get("ok") and isinstance(raw_v.get("result"), dict) else {}
-        if v.get("hasArgon") and (v.get("hasThinking") or not thinking_menu_btn or used_native_argon):
+        if v.get("hasModel") and (v.get("hasThinking") or not thinking_menu_btn or used_native_thinking):
             return {
                 "ok": True,
-                "model": model,
-                "thinking": thinking,
+                "mode": mode_norm,
+                "model": route["model"],
+                "thinking": route["thinking"],
                 "current_text": v.get("text"),
                 "aria_label": v.get("aria")
             }
 
         return {
             "ok": False,
-            "error": f"Verification failed: button reads '{v.get('text')}' (aria: '{v.get('aria')}')",
+            "error": f"Verification failed for {route['model']} ({mode_norm}): button reads '{v.get('text')}' (aria: '{v.get('aria')}')",
             "current_text": v.get("text"),
             "aria_label": v.get("aria")
         }
@@ -812,116 +1260,222 @@ class GeminiBrainDriver:
     ) -> bool:
         """
         Ensures Deep Research mode is active in the prompt bar.
-        Accurately navigates: '+' (Upload & tools) -> 'More tools' -> 'Deep Research'
-        and confirms the [ ⚛ Deep research ] pill chip is active.
+        Automatically switches segmented mode to Chat first (Deep Research does not exist in Task mode),
+        then drives synchronous DOM steps with Python-side settling to avoid long async EVAL_DOM hangs:
+        '+' (Upload & tools) -> 'More tools' -> 'Deep Research' -> verify [ ⚛ Deep research ] chip.
         """
-        ready = self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=profile)
+        prof = profile or self.default_profile
+        ready = self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=prof)
         if not ready.get("ready"):
             return False
+        mode_res = self.ensure_execution_mode(tab_id, mode="chat", profile=prof)
+        if not mode_res.get("ok"):
+            return False
 
-        activate_js = r"""
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        chip_check_js = """
         const isVis = (el) => {
             if (!el) return false;
             const r = el.getBoundingClientRect();
             const s = window.getComputedStyle(el);
             return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
         };
-
-        // 1. Check if Deep research pill chip is already active in prompt bar
         const inputArea = document.querySelector(
             'input-container, .input-area-container, .text-input-field, form, rich-textarea'
         ) || document.body;
-        const existingChips = Array.from(inputArea.querySelectorAll(
+        const chips = Array.from(inputArea.querySelectorAll(
             'button, mat-chip, .tool-chip, [role="button"], .pill'
         )).filter(isVis);
-
-        for (const c of existingChips) {
+        for (const c of chips) {
             const txt = ((c.innerText || '') + ' ' + (c.getAttribute('aria-label') || '')).toLowerCase();
             if (txt.includes('deep research') && !c.closest('.cdk-overlay-container')) {
-                return { ok: true, mode: 'deep_research', note: 'already_active' };
+                return true;
             }
         }
-
-        // 2. Click '+' (Upload & tools) button
-        const plusBtn = Array.from(document.querySelectorAll(
-            'button[aria-label*="Upload & tools" i], ' +
-            'button[aria-label*="Upload and tools" i], ' +
-            'gem-icon-button.menu-button button, ' +
-            'button[aria-label*="Upload" i]'
-        )).find(isVis);
-
-        if (!plusBtn) {
-            return { ok: false, error: 'Upload & tools button not found' };
-        }
-
-        plusBtn.click();
-        await sleep(500);
-
-        // 3. Find and click 'More tools' button in the tools drawer
-        let moreToolsBtn = null;
-        for (let attempt = 0; attempt < 12; attempt++) {
-            moreToolsBtn = Array.from(document.querySelectorAll(
-                'button.more-tools-button, ' +
-                'button.toolbox-drawer-menu-item, ' +
-                'button[aria-label="More tools"], ' +
-                '.cdk-overlay-pane button'
-            )).filter(isVis).find(b => {
-                const t = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
-                return t.includes('more tools');
-            });
-            if (moreToolsBtn) break;
-            await sleep(150);
-        }
-
-        if (!moreToolsBtn) {
-            return { ok: false, error: 'More tools button not found in tools drawer' };
-        }
-
-        moreToolsBtn.click();
-        await sleep(500);
-
-        // 4. Find and click 'Deep research' button in the submenu
-        let deepResearchBtn = null;
-        for (let attempt = 0; attempt < 12; attempt++) {
-            deepResearchBtn = Array.from(document.querySelectorAll(
-                '.cdk-overlay-pane button, ' +
-                'button, ' +
-                '[role="menuitem"], ' +
-                '.mat-mdc-list-item'
-            )).filter(isVis).find(b => {
-                const t = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
-                return t === 'deep research' || t.includes('deep research');
-            });
-            if (deepResearchBtn) break;
-            await sleep(150);
-        }
-
-        if (!deepResearchBtn) {
-            return { ok: false, error: 'Deep research option not found in More tools submenu' };
-        }
-
-        deepResearchBtn.click();
-        await sleep(600);
-
-        // 5. Verify the pill chip is mounted in the input area
-        const chipsAfter = Array.from(inputArea.querySelectorAll(
-            'button, mat-chip, .tool-chip, [role="button"], .pill'
-        )).filter(isVis);
-
-        for (const c of chipsAfter) {
-            const txt = ((c.innerText || '') + ' ' + (c.getAttribute('aria-label') || '')).toLowerCase();
-            if (txt.includes('deep research') && !c.closest('.cdk-overlay-container')) {
-                return { ok: true, mode: 'deep_research' };
-            }
-        }
-
-        return { ok: false, error: 'Deep Research chip not verified in prompt bar after clicking' };
+        return false;
         """
 
-        raw_res = self.execute_js(tab_id, activate_js, profile=profile)
-        res_data = raw_res.get("result") if isinstance(raw_res, dict) and raw_res.get("ok") and isinstance(raw_res.get("result"), dict) else raw_res
-        return bool(isinstance(res_data, dict) and res_data.get("ok"))
+        r_chk = self.execute_js(tab_id, chip_check_js, timeout=10.0, profile=prof)
+        if isinstance(r_chk, dict) and r_chk.get("result") is True:
+            return True
+
+        click_dr_js = """
+        const isVis = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const dr = Array.from(document.querySelectorAll(
+            '.cdk-overlay-pane button, .cdk-overlay-container [role="menuitem"], .cdk-overlay-container .mat-mdc-list-item, button, [role="menuitem"], .mat-mdc-list-item'
+        )).filter(isVis).find(b => {
+            const t = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
+            return t === 'deep research' || t.includes('deep research');
+        });
+        if (!dr) return false;
+        dr.click();
+        return true;
+        """
+
+        def _verify_dr_chip() -> bool:
+            self._nudge_compositor(tab_id, profile=prof)
+            for _ in range(10):
+                time.sleep(0.15)
+                chk = self.execute_js(tab_id, chip_check_js, timeout=10.0, profile=prof)
+                if isinstance(chk, dict) and chk.get("result") is True:
+                    return True
+            return False
+
+        # Path 1: Direct visible Deep Research button/chip on updated Gemini composer
+        direct_dr_js = """
+        const isVis = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const btn = Array.from(document.querySelectorAll('button, [role="button"], mat-chip')).filter(isVis).find(el => {
+            if (el.closest('nav, aside, .conversation-list, gem-nav-list-item')) return false;
+            const t = ((el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase().trim();
+            return t === 'deep research' || t.includes('deep research');
+        });
+        if (!btn) return false;
+        btn.click();
+        return true;
+        """
+        direct_res = self.execute_js(tab_id, direct_dr_js, timeout=10.0, profile=prof)
+        if isinstance(direct_res, dict) and direct_res.get("result") is True and _verify_dr_chip():
+            return True
+
+        # Path 2: Gemini Web 'Tools' menu button -> Deep Research (or More tools -> Deep Research)
+        click_tools_js = """
+        const isVis = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const toolsBtn = Array.from(document.querySelectorAll(
+            'button[aria-label*="Tools" i], button[data-test-id*="tools" i], button.toolbox-drawer-button, input-area-v2 button, .input-area-container button'
+        )).filter(isVis).find(b => {
+            const t = (b.innerText || '').trim().toLowerCase();
+            const a = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+            return t === 'tools' || a === 'tools' || (a.includes('tools') && !a.includes('upload'));
+        });
+        if (!toolsBtn) return false;
+        const bd = document.querySelector('.cdk-overlay-backdrop');
+        if (bd) bd.click();
+        toolsBtn.click();
+        return true;
+        """
+        t_res = self.execute_js(tab_id, click_tools_js, timeout=10.0, profile=prof)
+        if isinstance(t_res, dict) and t_res.get("result") is True:
+            self._nudge_compositor(tab_id, profile=prof)
+            for _ in range(8):
+                time.sleep(0.15)
+                dr_res = self.execute_js(tab_id, click_dr_js, timeout=10.0, profile=prof)
+                if isinstance(dr_res, dict) and dr_res.get("result") is True:
+                    if _verify_dr_chip():
+                        return True
+                    break
+
+        find_mt_js = """
+        const isVis = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const mt = Array.from(document.querySelectorAll(
+            '[data-test-id="more-tools-button"], button.more-tools-button, button.toolbox-drawer-menu-item, button[aria-label="More tools"], .cdk-overlay-pane button'
+        )).filter(isVis).find(b => ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().includes('more tools'));
+        return Boolean(mt);
+        """
+
+        click_plus_js = """
+        const isVis = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const plusBtn = Array.from(document.querySelectorAll(
+            'button[aria-label*="Upload & tools" i], button[aria-label*="Upload and tools" i], gem-icon-button.menu-button button, button[aria-label*="Upload" i]'
+        )).find(isVis);
+        if (!plusBtn) return { ok: false, error: 'Upload & tools button not found' };
+        if (plusBtn.getAttribute('aria-expanded') !== 'true') {
+            const bd = document.querySelector('.cdk-overlay-backdrop');
+            if (bd) bd.click();
+            plusBtn.click();
+        }
+        return { ok: true };
+        """
+
+        # Path 3: '+' (Upload & tools) -> direct Deep Research OR More tools -> Deep Research
+        mt_ready = False
+        for attempt in range(2):
+            dr_direct = self.execute_js(tab_id, click_dr_js, timeout=10.0, profile=prof)
+            if isinstance(dr_direct, dict) and dr_direct.get("result") is True and _verify_dr_chip():
+                return True
+            mt_res = self.execute_js(tab_id, find_mt_js, timeout=10.0, profile=prof)
+            if isinstance(mt_res, dict) and mt_res.get("result") is True:
+                mt_ready = True
+                break
+            p_res = self.execute_js(tab_id, click_plus_js, timeout=10.0, profile=prof)
+            if not (isinstance(p_res, dict) and isinstance(p_res.get("result"), dict) and p_res["result"].get("ok")):
+                print(f"[GeminiDriver] Deep Research '+' open error (attempt {attempt + 1}): {p_res}", file=sys.stderr)
+                continue
+            self._nudge_compositor(tab_id, profile=prof)
+            for _ in range(10):
+                time.sleep(0.15)
+                dr_direct = self.execute_js(tab_id, click_dr_js, timeout=10.0, profile=prof)
+                if isinstance(dr_direct, dict) and dr_direct.get("result") is True:
+                    if _verify_dr_chip():
+                        return True
+                mt_res = self.execute_js(tab_id, find_mt_js, timeout=10.0, profile=prof)
+                if isinstance(mt_res, dict) and mt_res.get("result") is True:
+                    mt_ready = True
+                    break
+            if mt_ready:
+                break
+
+        if not mt_ready:
+            print("[GeminiDriver] Deep Research toggle failed: More tools / Tools / Deep Research option not visible", file=sys.stderr)
+            return False
+
+        click_mt_js = """
+        const isVis = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const s = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        const mt = Array.from(document.querySelectorAll(
+            '[data-test-id="more-tools-button"], button.more-tools-button, button.toolbox-drawer-menu-item, button[aria-label="More tools"], .cdk-overlay-pane button'
+        )).filter(isVis).find(b => ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().includes('more tools'));
+        if (!mt) return false;
+        mt.click();
+        return true;
+        """
+        self.execute_js(tab_id, click_mt_js, timeout=10.0, profile=prof)
+        self._nudge_compositor(tab_id, profile=prof)
+
+        dr_clicked = False
+        for _ in range(12):
+            time.sleep(0.15)
+            dr_res = self.execute_js(tab_id, click_dr_js, timeout=10.0, profile=prof)
+            if isinstance(dr_res, dict) and dr_res.get("result") is True:
+                dr_clicked = True
+                break
+
+        if not dr_clicked:
+            print("[GeminiDriver] Deep Research toggle failed: Deep research option not found in More tools submenu", file=sys.stderr)
+            return False
+
+        if _verify_dr_chip():
+            return True
+
+        print("[GeminiDriver] Deep Research toggle failed: Deep Research chip not verified in prompt bar after clicking", file=sys.stderr)
+        return False
 
     def create_session(
         self,
@@ -957,27 +1511,46 @@ class GeminiBrainDriver:
             print(f"[GeminiDriver] Continuing existing session '{session_id}' on Tab {tab_id} ({prof}).")
             return session_id
 
-        # Auto-boot Chrome if no Gemini tab is currently open on this profile
+        # Check for an AGENT-OWNED Gemini tab; only boot Chrome if profile is actually disconnected from bridge
         tab = self.get_open_gemini_tab(profile=prof)
         if not tab:
-            try:
-                from profile_manager import get_next_available_profile, launch_profile_window
-                target_p = get_next_available_profile(preferred=prof)
-                p_dir = target_p.dir_name if target_p else prof
-                print(f"[GeminiDriver] No active Gemini tab detected for '{p_dir}'. Booting Chrome profile window...")
-                launch_profile_window(p_dir, "https://gemini.google.com/app")
-                for _ in range(25):
-                    time.sleep(0.5)
-                    tab = self.get_open_gemini_tab(profile=prof)
-                    if tab:
-                        print(f"[GeminiDriver] Profile '{p_dir}' connected on Tab {tab['id']}.")
-                        break
-            except Exception as e:
-                print(f"[GeminiDriver] Auto-boot note: {e}", file=sys.stderr)
+            probe_res = self._call_api_raw("/command", {"action": "LIST_TABS", "profile": prof}, profile=prof)
+            if not (isinstance(probe_res, dict) and probe_res.get("ok")):
+                try:
+                    open_prof_res = self._call_api_raw(
+                        "/profile/open",
+                        {"profile": prof, "url": "https://gemini.google.com/app", "auto_close_idle": True, "timeout": 15.0},
+                        method="POST",
+                        timeout=22.0,
+                    )
+                    if isinstance(open_prof_res, dict) and open_prof_res.get("code") == "AGENT_CAPACITY_REACHED":
+                        raise RuntimeError(f"AGENT_CAPACITY_REACHED: {open_prof_res.get('error')}")
+                    for _ in range(15):
+                        time.sleep(0.5)
+                        tab = self.get_open_gemini_tab(profile=prof)
+                        if tab:
+                            print(f"[GeminiDriver] Profile '{prof}' connected on agent tab {tab['id']}.")
+                            break
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    print(f"[GeminiDriver] Auto-boot note: {e}", file=sys.stderr)
 
         if own_tab:
-            # Spawn dedicated background tab
-            open_res = self._call_api("/command", {"action": "OPEN_TAB", "params": {"url": "https://gemini.google.com/app", "active": False}}, profile=prof)
+            # Spawn dedicated background tab (enforces MAX_AGENT_TABS=6 & registers ownership)
+            open_res = self._call_api(
+                "/command",
+                {
+                    "action": "OPEN_TAB",
+                    "owner": f"gemini_driver:{session_id}",
+                    "surface": "gemini_web",
+                    "agent_guarded": True,
+                    "params": {"url": "https://gemini.google.com/app", "active": False},
+                },
+                profile=prof,
+            )
+            if open_res.get("code") == "AGENT_CAPACITY_REACHED":
+                raise RuntimeError(f"AGENT_CAPACITY_REACHED: {open_res.get('error')}")
             tab_id = open_res.get("tabId")
             time.sleep(3.0)
         else:
@@ -1017,7 +1590,19 @@ class GeminiBrainDriver:
                     self.execute_js(tab_id, click_new, profile=prof)
                     self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=prof)
             else:
-                open_res = self._call_api("/command", {"action": "OPEN_TAB", "params": {"url": "https://gemini.google.com/app", "active": True}}, profile=prof)
+                open_res = self._call_api(
+                    "/command",
+                    {
+                        "action": "OPEN_TAB",
+                        "owner": f"gemini_driver:{session_id}",
+                        "surface": "gemini_web",
+                        "agent_guarded": True,
+                        "params": {"url": "https://gemini.google.com/app", "active": True},
+                    },
+                    profile=prof,
+                )
+                if open_res.get("code") == "AGENT_CAPACITY_REACHED":
+                    raise RuntimeError(f"AGENT_CAPACITY_REACHED: {open_res.get('error')}")
                 tab_id = open_res.get("tabId")
                 self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=prof)
 
@@ -1051,7 +1636,7 @@ class GeminiBrainDriver:
         for fp in file_paths:
             p = Path(fp)
             if not p.is_absolute():
-                p = Path("<BRAIN_ROOT>") / p
+                p = Path("./") / p
             if not p.exists():
                 return {"ok": False, "error": f"File not found: {p}"}
             abs_files.append(str(p.resolve()))
@@ -1262,18 +1847,21 @@ class GeminiBrainDriver:
         prompt: str,
         files: List[str] | None = None,
         deep_research: bool = False,
-        model: str = "4 Argon",
-        thinking: str = "High",
+        model: Optional[str] = None,
+        thinking: Optional[str] = None,
+        mode: str = "chat",
         check_usage: bool = True,
         timeout_sec: int = 300,
+        poll_interval_sec: float = 2.5,
+        max_recovery_retries: int = 2,
     ) -> Dict[str, Any]:
         """
         Executes a strict 5-Step Pre-Send Sequence:
-        1. Verify Model=Argon & Thinking=High
-        2. Insert Prompt Text into Quill (<p> nodes, preserving chips & avoiding raw '\\n' Enter-submit)
+        1. Verify Mode (Chat vs Task), Model ('4 Argon' for Chat consulting, '4 Hydrogen' for Deep Research or Task offloading), & Thinking level
+        2. Toggle Deep Research (if enabled in Chat mode) & verify '[ ⚛ Deep research ]' pill chip
         3. Attach Context/Code Files (-f)
-        4. Toggle Deep Research (if enabled) & verify '[ ⚛ Deep research ]' pill chip
-        5. Dispatch Trusted Send Click & Poll Completion (with Deep Research Plan-Card Guard)
+        4. Insert Prompt Text into Quill (<p> nodes, preserving chips & avoiding raw '\\n' Enter-submit)
+        5. Dispatch Trusted Send Click & Poll Completion (with Deep Research Plan-Card Guard & Task-mode step guard)
         """
         if session_id not in self.registry:
             self.create_session(session_id=session_id)
@@ -1282,29 +1870,71 @@ class GeminiBrainDriver:
         tab_id = meta["tab_id"]
         prof = meta.get("profile") or self.default_profile
 
-        # STEP 1: Ensure Model = 4 Argon & Thinking = High
-        print(f"[GeminiDriver] [Step 1/5] Ensuring Model={model} and Thinking={thinking} on {prof or 'active'}...")
-        ensure_res = self.ensure_model_and_thinking(tab_id, model=model, thinking=thinking, profile=prof)
+        route = resolve_execution_route(
+            model=model,
+            thinking=thinking,
+            mode=mode,
+            deep_research=deep_research,
+        )
+        target_mode = route["mode"]
+        target_model = route["model"]
+        target_thinking = route["thinking"]
+
+        # STEP 1: Ensure Segmented Mode + Model + Thinking Level
+        print(
+            f"[GeminiDriver] [Step 1/5] Ensuring Mode={target_mode}, Model={target_model}, "
+            f"Thinking={target_thinking or 'N/A (Task/Flash)'} on {prof or 'active'}..."
+        )
+        ensure_res = self.ensure_model_and_thinking(
+            tab_id,
+            model=target_model,
+            thinking=target_thinking,
+            mode=target_mode,
+            profile=prof,
+        )
         if self.tab_id and self.tab_id != tab_id:
             tab_id = self.tab_id
             meta["tab_id"] = tab_id
             self._save_registry()
         if not ensure_res.get("ok"):
+            if ensure_res.get("needs_reauth"):
+                return {"ok": False, "code": "NEEDS_REAUTH", "error": ensure_res.get("error")}
             if ensure_res.get("rate_limited"):
-                print(f"[GeminiDriver] ⚠️ Model {model} is rate limited on {prof}: {ensure_res.get('message')}", file=sys.stderr)
-                try:
-                    from profile_manager import mark_profile_cooldown
-                    if prof:
-                        mark_profile_cooldown(prof, cooldown_seconds=1800)
-                except Exception:
-                    pass
-                return {"ok": False, "rate_limited": True, "error": f"Model {model} rate limited: {ensure_res.get('message')}"}
+                # 1x transient rate-limit verification retry before marking gemini_web_neon cooldown
+                time.sleep(2.5)
+                retry_res = self.ensure_model_and_thinking(
+                    tab_id,
+                    model=target_model,
+                    thinking=target_thinking,
+                    mode=target_mode,
+                    profile=prof,
+                )
+                if retry_res.get("ok"):
+                    ensure_res = retry_res
+                else:
+                    print(f"[GeminiDriver] ⚠️ Model {target_model} is rate limited on {prof}: {retry_res.get('message') or ensure_res.get('message')}", file=sys.stderr)
+                    try:
+                        from profile_manager import mark_profile_cooldown
+                        import profile_lock_manager
+                        if prof:
+                            profile_lock_manager.mark_bucket_cooldown(prof, "gemini_web_neon", cooldown_seconds=1800, reason=str(retry_res.get("message") or ensure_res.get("message") or "rate_limited"))
+                            mark_profile_cooldown(prof, cooldown_seconds=1800)
+                    except Exception:
+                        pass
+                    return {"ok": False, "rate_limited": True, "error": f"Model {target_model} rate limited: {retry_res.get('message') or ensure_res.get('message')}"}
 
-            print(f"[GeminiDriver] Model switch unverified ({ensure_res.get('error')}). Retrying...", file=sys.stderr)
-            time.sleep(1.0)
-            ensure_res = self.ensure_model_and_thinking(tab_id, model=model, thinking=thinking, profile=prof)
             if not ensure_res.get("ok"):
-                return {"ok": False, "error": f"Pre-send model verification gate failed: UI is not on {model} ({ensure_res.get('error')}). Aborting prompt send."}
+                print(f"[GeminiDriver] Model/mode switch unverified ({ensure_res.get('error')}). Retrying...", file=sys.stderr)
+                time.sleep(1.0)
+                ensure_res = self.ensure_model_and_thinking(
+                    tab_id,
+                    model=target_model,
+                    thinking=target_thinking,
+                    mode=target_mode,
+                    profile=prof,
+                )
+                if not ensure_res.get("ok"):
+                    return {"ok": False, "error": f"Pre-send model verification gate failed: UI is not on {target_model} ({target_mode}) ({ensure_res.get('error')}). Aborting prompt send."}
 
         # Baseline count of existing model responses before sending
         is_fresh_session = (meta.get("turns", 0) == 0)
@@ -1357,6 +1987,22 @@ class GeminiBrainDriver:
                 print(f"[GeminiDriver] File upload warning: {up_res.get('error')}", file=sys.stderr)
             time.sleep(0.5)
 
+        # Run 3-Stage Popup Self-Healer before inserting prompt text
+        if popup_healer:
+            heal_res = popup_healer.dismiss_blocking_popups(
+                eval_fn=lambda code: self.execute_js(tab_id, code, profile=prof),
+                screenshot_fn=lambda out_p: self.take_screenshot(tab_id, save_path=out_p, profile=prof),
+                surface="gemini_web",
+                target_point=(0.5, 0.85),
+            )
+            if heal_res.get("blocked"):
+                return {
+                    "ok": False,
+                    "code": "POPUP_BLOCKING_INPUT",
+                    "error": f"Unknown blocking overlay on Gemini Web. Snapshot saved to {heal_res.get('anomaly_screenshot')}",
+                    "anomaly": heal_res,
+                }
+
         # STEP 4: Insert Prompt Text into Quill editor (<p> nodes via textContent — 100% immune to OS window focus & preserves chips!)
         print(f"[GeminiDriver] [Step 4/5] Inserting prompt ({len(prompt)} chars) into Quill editor...")
         prep_js = f"""
@@ -1396,14 +2042,15 @@ class GeminiBrainDriver:
         prep_res = self.execute_js(tab_id, prep_js, profile=prof)
         time.sleep(0.3)
 
-        # Wait until prompt box height reflow settles and send button slides in
+        # Wait until prompt box height reflow settles and submit/send button appears
         settle_box_js = """
+        const d = window.__geminiDriver;
         let prevH = 0;
         for (let i = 0; i < 15; i++) {
-            const box = document.querySelector('rich-textarea');
-            const btn = document.querySelector('button[aria-label="Send message"], gem-icon-button.send-button button, button[aria-label*="Send" i]');
+            const box = document.querySelector('rich-textarea, input-area-v2');
+            const btn = d.findSubmitButton();
             const h = box ? box.offsetHeight : 0;
-            const btnReady = btn && btn.getBoundingClientRect().width > 0;
+            const btnReady = Boolean(btn && btn.getBoundingClientRect().width > 0);
             if (h > 0 && h === prevH && btnReady) break;
             prevH = h;
             await new Promise(r => setTimeout(r, 100));
@@ -1413,50 +2060,87 @@ class GeminiBrainDriver:
         self.execute_js(tab_id, settle_box_js, profile=prof)
         time.sleep(0.2)
 
-        # STEP 5: Locate & Click Send button (direct DOM .click() + Enter fallback)
-        print(f"[GeminiDriver] [Step 5/5] Submitting prompt via Send button on {prof or 'active'}...")
+        # STEP 5: Locate & Click Send/Task Submit button (explicit selectors + Task-mode rightmost button + CDP click + Ctrl+Enter fallback)
+        print(f"[GeminiDriver] [Step 5/5] Submitting prompt via Send/Task button on {prof or 'active'}...")
         click_send_js = """
+        const d = window.__geminiDriver;
         for (let i = 0; i < 15; i++) {
-            const btn = document.querySelector('button[aria-label="Send message"], gem-icon-button.send-button button, button[aria-label*="Send" i]');
+            const btn = d.findSubmitButton();
             if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
+                const r = btn.getBoundingClientRect();
+                const cx = Math.round(r.left + r.width / 2);
+                const cy = Math.round(r.top + r.height / 2);
                 btn.focus();
+                await d.smartClick(btn);
                 btn.click();
                 const g = btn.closest("gem-icon-button");
                 if (g) g.click();
-                return { ok: true, clicked: true };
+                return {
+                    ok: true,
+                    clicked: true,
+                    cx: cx,
+                    cy: cy,
+                    aria: btn.getAttribute('aria-label') || '',
+                    testId: btn.getAttribute('data-test-id') || ''
+                };
             }
             await new Promise(r => setTimeout(r, 100));
         }
-        return { ok: false, error: 'Send button not ready' };
+        return { ok: false, error: 'Send/Submit button not ready' };
         """
         send_res = self.execute_js(tab_id, click_send_js, profile=prof)
+        send_info = (send_res.get("result") or {}) if isinstance(send_res, dict) else {}
         time.sleep(0.5)
 
         time.sleep(0.8)
         check_submitted_js = """
+        const d = window.__geminiDriver;
         const box = document.querySelector('rich-textarea div[contenteditable="true"], div[role="textbox"][contenteditable="true"], textarea');
         const text = box ? (box.innerText || '').trim() : '';
         const stopBtn = document.querySelector('button[aria-label*="Stop" i]');
-        return { stillHasText: Boolean(text.length > 0), isGenerating: Boolean(stopBtn && stopBtn.offsetWidth > 0) };
+        const btn = d.findSubmitButton();
+        const r = btn ? btn.getBoundingClientRect() : null;
+        return {
+            stillHasText: Boolean(text.length > 0),
+            isGenerating: Boolean(stopBtn && stopBtn.offsetWidth > 0),
+            btnCx: r ? Math.round(r.left + r.width / 2) : null,
+            btnCy: r ? Math.round(r.top + r.height / 2) : null
+        };
         """
         sub_check = self.execute_js(tab_id, check_submitted_js, profile=prof)
-        sub_res = sub_check.get("result") if sub_check else {}
+        sub_res = sub_check.get("result") if isinstance(sub_check, dict) and isinstance(sub_check.get("result"), dict) else {}
 
         if sub_res.get("stillHasText") and not sub_res.get("isGenerating"):
-            print("[GeminiDriver] Input text still present: executing Enter key submission fallback...")
+            # Fallback 1: Hardware-trusted CDP click on the detected submit/up-arrow button
+            btn_cx = sub_res.get("btnCx") or send_info.get("cx")
+            btn_cy = sub_res.get("btnCy") or send_info.get("cy")
+            if btn_cx and btn_cy:
+                print(f"[GeminiDriver] Input text still present: dispatching hardware CDP click on submit button ({btn_cx}, {btn_cy})...")
+                self._cdp_mouse_click(tab_id, btn_cx, btn_cy, profile=prof)
+                time.sleep(0.7)
+                sub_check2 = self.execute_js(tab_id, check_submitted_js, profile=prof)
+                sub_res = sub_check2.get("result") if isinstance(sub_check2, dict) and isinstance(sub_check2.get("result"), dict) else {}
+
+        if sub_res.get("stillHasText") and not sub_res.get("isGenerating"):
+            # Fallback 2: Ctrl+Enter (Task mode / multi-line submit) followed by Enter
+            print("[GeminiDriver] Input text still present: executing Ctrl+Enter + Enter key submission fallback...")
             try:
+                self.call_cdp(tab_id, "Input.dispatchKeyEvent", params={"type": "rawKeyDown", "modifiers": 2, "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "key": "Enter", "code": "Enter", "text": "\r"}, profile=prof)
+                self.call_cdp(tab_id, "Input.dispatchKeyEvent", params={"type": "keyUp", "modifiers": 2, "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "key": "Enter", "code": "Enter"}, profile=prof)
+                time.sleep(0.4)
                 self.call_cdp(tab_id, "Input.dispatchKeyEvent", params={"type": "rawKeyDown", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "key": "Enter", "code": "Enter", "text": "\r"}, profile=prof)
                 self.call_cdp(tab_id, "Input.dispatchKeyEvent", params={"type": "char", "text": "\r", "key": "Enter", "code": "Enter"}, profile=prof)
                 self.call_cdp(tab_id, "Input.dispatchKeyEvent", params={"type": "keyUp", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "key": "Enter", "code": "Enter"}, profile=prof)
             except Exception:
                 pass
 
-        # Poll for response completion (with Deep Research Plan-Card vs Final-Report state machine)
+        # Poll for response completion (with Deep Research Plan-Card vs Final-Report state machine & bounded network/popup recovery)
         print(f"[GeminiDriver] Awaiting response (deep_research={deep_research}, timeout: {timeout_sec}s)...")
         start_time = time.time()
         last_change_time = time.time()
         response_started = False
         reentered_after_stall = False
+        recovery_attempts = 0
         last_text = ""
         stable_count = 0
         last_heartbeat = time.time()
@@ -1466,13 +2150,14 @@ class GeminiBrainDriver:
         plan_turn_count = baseline
 
         while time.time() - start_time < timeout_sec:
-            time.sleep(2.5)
+            time.sleep(max(0.0, poll_interval_sec))
 
             # Heartbeat lease renewal to prevent eviction during long reasoning/research
             if time.time() - last_heartbeat > 25.0:
                 try:
-                    from profile_lock_manager import renew_profile_lease
-                    renew_profile_lease(prof or "Profile 14", agent_id=session_id, extend_seconds=180.0)
+                    with profile_lock_context(timeout=8.0):
+                        from profile_lock_manager import renew_profile_lease
+                        renew_profile_lease(prof or "Profile 14", agent_id=session_id, extend_seconds=180.0)
                 except Exception:
                     pass
                 last_heartbeat = time.time()
@@ -1524,17 +2209,52 @@ class GeminiBrainDriver:
             }}
 
             const latest = responses[count - 1] || immersive;
-            const contentNode = latest ? (latest.querySelector('message-content, .model-response-text, .response-content, .markdown') || latest) : null;
+            const mainArea = document.querySelector('main, .chat-container, .conversation-container') || document.body;
+            const mainTail = mainArea ? (mainArea.innerText || '').slice(-5000) : '';
+            const subagentsRunning = /\\b\\d+\\s+subagents?\\s+running\\b|\\bsubagents?\\s+running\\b/i.test(mainTail);
+            const stepsPending = /\\b\\d+\\/\\d+\\s+steps\\b/i.test(mainTail) && !/\\bcompleted\\b/i.test(mainTail.slice(-400));
+
+            // Harvest from Canvas/immersive panel if open, else pick the longest/final response turn (Task Mode spawns Turn 1 + Turn 2)
+            let bestTurnText = '';
+            for (const respNode of responses) {{
+                const ansNode = respNode.querySelector('message-content, .model-response-text, .markdown') || respNode.querySelector('.response-content') || respNode;
+                const candTxt = (ansNode.innerText || '').trim();
+                if (candTxt.length > bestTurnText.length) {{
+                    bestTurnText = candTxt;
+                }}
+            }}
+            const taskStepsNode = latest ? latest.querySelector('spark-thinking-steps') : null;
+            const explicitAnswerNode = latest ? latest.querySelector('message-content, .model-response-text, .markdown') : null;
+            const contentNode = explicitAnswerNode || (latest ? latest.querySelector('.response-content') : null) || latest;
             let cleanText = contentNode ? (contentNode.innerText || '').trim() : '';
+            if (bestTurnText.length > cleanText.length) {{
+                cleanText = bestTurnText;
+            }}
             if (immersive && (immersive.innerText || '').trim().length > cleanText.length) {{
                 cleanText = (immersive.innerText || '').trim();
             }}
+            if (taskStepsNode) {{
+                if (/\\bgemini said\\b/i.test(cleanText)) {{
+                    cleanText = cleanText.replace(/^[\\s\\S]*?\\bGemini said\\s*/i, '').trim();
+                }} else {{
+                    const stepsTxt = (taskStepsNode.innerText || '').trim();
+                    if (stepsTxt && cleanText.startsWith(stepsTxt)) {{
+                        cleanText = cleanText.slice(stepsTxt.length).trim();
+                    }}
+                }}
+            }}
             cleanText = cleanText.replace(/^Gemini said\\s*/i, '').trim();
+            const isTaskStepsOnly = Boolean(
+                taskStepsNode && !explicitAnswerNode && !/\\bgemini said\\b/i.test((latest ? latest.innerText : '') || '')
+            );
+            const isTaskStepsDone = Boolean(
+                taskStepsNode && /\\bcomplete\\b/i.test((taskStepsNode.innerText || ''))
+            );
             if (!cleanText || cleanText.toLowerCase() === 'show code' || cleanText.toLowerCase() === 'analyzing') {{
                 const codeResult = latest ? latest.querySelector('.code-result-container, code-block, pre') : null;
                 if (codeResult && (codeResult.textContent || '').trim()) {{
                     cleanText = (codeResult.textContent || '').trim();
-                }} else if (latest) {{
+                }} else if (latest && !isTaskStepsOnly) {{
                     const rawText = (latest.textContent || '').replace(/^(?:Analyzing\\s*|Show code\\s*|Gemini said\\s*)+/i, '').trim();
                     if (rawText) cleanText = rawText;
                 }}
@@ -1542,8 +2262,27 @@ class GeminiBrainDriver:
 
             // (stopBtn and isStopBtnVisible already evaluated at top of poll_js)
 
-            // Check if Send button is back in the DOM and ready
-            const sendBtn = document.querySelector('button[aria-label="Send message"], gem-icon-button.send-button button, button[aria-label*="Send" i]');
+            // Check for transient network/error overlays or Chrome offline page
+            const netErrRe = /ERR_INTERNET_DISCONNECTED|network error|failed to fetch|connection lost|something went wrong|no internet/i;
+            let transientNetworkError = null;
+            const bodyPreview = ((document.body && document.body.innerText) || '').slice(0, 1200);
+            if (/ERR_INTERNET_DISCONNECTED|No internet|This site can.?t be reached/i.test(bodyPreview)) {{
+                transientNetworkError = bodyPreview.split('\\n')[0].trim() || 'ERR_INTERNET_DISCONNECTED';
+            }} else {{
+                const alertNodes = Array.from(document.querySelectorAll('mat-snack-bar-container, [role="alert"], .error-banner, .error-message, snack-bar-container'));
+                for (const an of alertNodes) {{
+                    const ar = an.getBoundingClientRect();
+                    if (ar.width <= 0 || ar.height <= 0) continue;
+                    const atxt = (an.innerText || '').trim();
+                    if (atxt && netErrRe.test(atxt)) {{
+                        transientNetworkError = atxt.slice(0, 300);
+                        break;
+                    }}
+                }}
+            }}
+
+            // Check if Send/Submit button is back in the DOM and ready
+            const sendBtn = d.findSubmitButton();
             const isSendBtnReady = Boolean(sendBtn && sendBtn.getBoundingClientRect().width > 0 && !sendBtn.disabled);
 
             // Ground-truth completion check on latest response or immersive panel
@@ -1578,12 +2317,16 @@ class GeminiBrainDriver:
             }}
 
             return {{
-                hasFinishedActions: hasFinishedActions && !isResearchInProgress,
+                hasFinishedActions: hasFinishedActions && !isResearchInProgress && !subagentsRunning && !stepsPending,
                 hasExportBtn: Boolean(exportBtn),
                 isPlanCard: isPlanCard,
-                isResearchInProgress: isResearchInProgress,
-                isStopBtnVisible: isStopBtnVisible || isResearchInProgress,
-                isSendBtnReady: isSendBtnReady && !isResearchInProgress,
+                isResearchInProgress: isResearchInProgress || subagentsRunning || stepsPending,
+                subagentsRunning: subagentsRunning,
+                isStopBtnVisible: isStopBtnVisible || isResearchInProgress || subagentsRunning || stepsPending,
+                isSendBtnReady: isSendBtnReady && !isResearchInProgress && !subagentsRunning && !stepsPending,
+                isTaskStepsOnly: isTaskStepsOnly,
+                isTaskStepsDone: isTaskStepsDone && !subagentsRunning && !stepsPending,
+                transientNetworkError: transientNetworkError,
                 text: cleanText,
                 chatId: chatId,
                 count: count,
@@ -1597,7 +2340,56 @@ class GeminiBrainDriver:
                 tab_id = self.tab_id
                 meta["tab_id"] = tab_id
                 self._save_registry()
-            data = (poll_res.get("result") or {}) if poll_res else {}
+
+            if not (isinstance(poll_res, dict) and poll_res.get("ok") and isinstance(poll_res.get("result"), dict)):
+                if recovery_attempts < max_recovery_retries:
+                    recovery_attempts += 1
+                    print(f"[GeminiDriver] ⚠️ Transient EVAL_DOM poll failure #{recovery_attempts}: {poll_res}. Running popup_healer + recovery...", file=sys.stderr)
+                    if popup_healer:
+                        try:
+                            popup_healer.dismiss_blocking_popups(
+                                eval_fn=lambda code: self.execute_js(tab_id, code, profile=prof),
+                                screenshot_fn=lambda out_p: self.take_screenshot(tab_id, save_path=out_p, profile=prof),
+                                surface="gemini_web",
+                                target_point=(0.5, 0.85),
+                            )
+                        except Exception:
+                            pass
+                    self._execute_sidebar_reentry(tab_id, prof, expected_chat_id=meta.get("chat_id"))
+                    last_change_time = time.time()
+                    continue
+                return {
+                    "ok": False,
+                    "code": "TRANSIENT_POLL_FAILURE",
+                    "error": f"Bridge EVAL_DOM failed {recovery_attempts + 1} times during poll: {poll_res}",
+                    "recovery_attempts": recovery_attempts,
+                }
+
+            data = poll_res.get("result") or {}
+            if data.get("transientNetworkError"):
+                net_err = str(data["transientNetworkError"])
+                if recovery_attempts < max_recovery_retries:
+                    recovery_attempts += 1
+                    print(f"[GeminiDriver] ⚠️ Transient network/DOM error detected (#{recovery_attempts}): {net_err}. Reloading & healing popups...", file=sys.stderr)
+                    self._execute_sidebar_reentry(tab_id, prof, expected_chat_id=meta.get("chat_id"))
+                    if popup_healer:
+                        try:
+                            popup_healer.dismiss_blocking_popups(
+                                eval_fn=lambda code: self.execute_js(tab_id, code, profile=prof),
+                                screenshot_fn=lambda out_p: self.take_screenshot(tab_id, save_path=out_p, profile=prof),
+                                surface="gemini_web",
+                                target_point=(0.5, 0.85),
+                            )
+                        except Exception:
+                            pass
+                    last_change_time = time.time()
+                    continue
+                return {
+                    "ok": False,
+                    "code": "TRANSIENT_NETWORK_FAILURE",
+                    "error": f"Transient network error persisted after {recovery_attempts} recovery retries: {net_err}",
+                    "recovery_attempts": recovery_attempts,
+                }
 
             # Update chat_id from polled data
             c_id = data.get("chatId")
@@ -1662,12 +2454,19 @@ class GeminiBrainDriver:
                     else:
                         stable_count = 0
             else:
-                # Standard Argon High-Thinking Completion Resolution
-                is_thinking_only = clean_body.lower() in ("analyzing", "show code", "") or clean_body.strip() == ""
+                # Standard Chat or Task Mode Completion Resolution
+                is_task_steps_only = bool(data.get("isTaskStepsOnly", False))
+                is_task_steps_done = bool(data.get("isTaskStepsDone", False))
+                is_thinking_only = (
+                    is_task_steps_only
+                    or clean_body.lower() in ("analyzing", "show code", "thinking it through...", "")
+                    or clean_body.strip() == ""
+                )
                 if len(clean_body) > 0 and turn_count > baseline and not is_stop_visible and not is_thinking_only:
                     if curr_text == last_text:
                         stable_count += 1
-                        if stable_count >= 2 or has_act:
+                        # Task mode omits Copy/feedback buttons cleanly; finish once stop disappears & text stabilizes
+                        if stable_count >= 2 or has_act or (target_mode == "task" and is_task_steps_done and stable_count >= 1):
                             is_complete = True
                     else:
                         stable_count = 0
@@ -1679,7 +2478,7 @@ class GeminiBrainDriver:
                     stable_count = 0
 
             # Recovery Check: If stop button, generating indicator, plan card, or response text is present
-            is_generating = bool(data.get("isGenerating", False) or is_stop_visible)
+            is_generating = bool(data.get("isGenerating", False) or is_stop_visible or data.get("isTaskStepsOnly", False))
             if is_stop_visible or is_generating or is_plan_card or len(clean_body) > 0:
                 response_started = True
 
@@ -1723,6 +2522,9 @@ class GeminiBrainDriver:
                     "session_id": session_id,
                     "profile": prof,
                     "chat_id": meta["chat_id"],
+                    "mode": target_mode,
+                    "model": target_model,
+                    "thinking": target_thinking,
                     "response": (rich_data.get("markdown") if isinstance(rich_data, dict) and rich_data.get("markdown") else clean_body),
                     "text": (rich_data.get("markdown") if isinstance(rich_data, dict) and rich_data.get("markdown") else clean_body),
                     "rich": rich_data,
@@ -1958,7 +2760,7 @@ class GeminiBrainDriver:
 
         if meta and meta.get("own_tab"):
             try:
-                self._call_api("/command", {"action": "CLOSE_TAB", "params": {"tabId": tab_id}}, profile=prof)
+                self._call_api("/command", {"action": "CLOSE_TAB", "agent_guarded": True, "params": {"tabId": tab_id}}, profile=prof)
             except Exception:
                 pass
 
@@ -1976,12 +2778,15 @@ class GeminiBrainDriver:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Gemini 4 Argon Driver for gemini.google.com")
+    parser = argparse.ArgumentParser(description="Gemini 4 Neon High Driver for gemini.google.com (Chat, Deep Research & Task)")
     parser.add_argument("prompt", nargs="?", default=None, help="Prompt to send")
     parser.add_argument("--profile", default=None, help="Target specific Chrome profile (e.g. 'Profile 13', 'Profile 14')")
     parser.add_argument("--upload", "--files", nargs="+", dest="upload", help="File paths to upload to Gemini before sending prompt")
-    parser.add_argument("--thinking", default="High", choices=["Low", "Medium", "High"], help="Thinking level")
-    parser.add_argument("--deep-research", action="store_true", help="Enable Deep research mode")
+    parser.add_argument("--model", default=None, help="Target Gemini Web model (defaults to '4 Neon' across Chat, Deep Research & Task; 4 Hydrogen/4 Carbon are blocked).")
+    parser.add_argument("--mode", default="chat", choices=["chat", "task"], help="Gemini segmented execution mode: 'chat' or 'task'")
+    parser.add_argument("--task", action="store_true", help="Shortcut for --mode task (parallel cloud subagent Task mode on 4 Neon High)")
+    parser.add_argument("--thinking", default="High", choices=["Low", "Medium", "High"], help="Thinking level (default: High)")
+    parser.add_argument("--deep-research", action="store_true", help="Enable Deep research mode (Chat mode; runs on 4 Neon High)")
     parser.add_argument("--new-chat", action="store_true", help="Open a fresh new chat session")
     parser.add_argument("--auto-clean", action="store_true", help="Automatically delete chat from sidebar after response")
     parser.add_argument("--usage", action="store_true", help="Audit and display live usage quota on profile without sending prompt")
@@ -1994,6 +2799,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     driver = GeminiBrainDriver(default_profile=args.profile)
+    effective_mode = "task" if args.task else args.mode
 
     if args.usage:
         prof = args.profile or "Profile 14"
@@ -2026,10 +2832,21 @@ if __name__ == "__main__":
         print("Delete result:", json.dumps(res, indent=2))
     elif args.prompt:
         sid = driver.create_session(subagent=args.session, new_chat=args.new_chat, profile_dir=args.profile)
-        res = driver.ask(sid, args.prompt, files=args.upload, deep_research=args.deep_research, thinking=args.thinking, check_usage=not args.no_usage)
+        res = driver.ask(
+            sid,
+            args.prompt,
+            files=args.upload,
+            deep_research=args.deep_research,
+            model=args.model,
+            thinking=args.thinking,
+            mode=effective_mode,
+            check_usage=not args.no_usage,
+        )
         if res.get("ok"):
             print("\n" + "=" * 80)
-            print(f" GEMINI 4 ARGON RESPONSE (Session: {sid} | Chat ID: {res.get('chat_id')} | Profile: {res.get('profile')})")
+            m_disp = (res.get("model") or "4 Argon").upper()
+            mode_disp = (res.get("mode") or effective_mode).upper()
+            print(f" GEMINI {m_disp} [{mode_disp}] RESPONSE (Session: {sid} | Chat ID: {res.get('chat_id')} | Profile: {res.get('profile')})")
             print("=" * 80)
             print(res.get("response"))
             print("=" * 80)

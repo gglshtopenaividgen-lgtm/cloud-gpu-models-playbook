@@ -13,7 +13,13 @@ import json
 import os
 import sys
 from typing import Dict, List, Any, Optional
-from playwright.async_api import async_playwright, Page, ElementHandle, TimeoutError as PlaywrightTimeoutError
+try:
+    from playwright.async_api import async_playwright, Page, ElementHandle, TimeoutError as PlaywrightTimeoutError
+except ImportError:
+    async_playwright = None
+    Page = Any  # type: ignore
+    ElementHandle = Any  # type: ignore
+    PlaywrightTimeoutError = Exception  # type: ignore
 
 DOM_INDEX_JS = """
 (() => {
@@ -212,6 +218,14 @@ def main():
     p_run.add_argument("--headed", action="store_true", help="Run headed browser")
 
     args = parser.parse_args()
+    if args.command in ("inspect", "run") and async_playwright is None:
+        print(
+            "❌ Error: 'playwright' is not installed in the current environment.\n"
+            "In WSL, run via Windows Python: /mnt/c/Python314/python.exe <script> < /dev/null\n"
+            "or run: pip install playwright",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.command == "inspect":
         res = asyncio.run(inspect_page(args.url, headed=args.headed, delay=args.delay))

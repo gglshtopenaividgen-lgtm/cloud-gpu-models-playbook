@@ -50,7 +50,7 @@ def find_brain_root() -> Path:
     for parent in current.parents:
         if (parent / ".agents").is_dir() and ((parent / "project_map.md").is_file() or (parent / "AGENTS.md").is_file()):
             return parent
-    return Path(r"<BRAIN_ROOT>")
+    return Path(r"./")
 
 
 def scan_project_files(root: Path, extensions: Set[str], max_files: int = 250) -> List[Path]:

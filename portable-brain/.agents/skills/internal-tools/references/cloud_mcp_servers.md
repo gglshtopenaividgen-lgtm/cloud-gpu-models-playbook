@@ -1,8 +1,8 @@
 # Multi-Cloud MCP Servers & Tools Reference
 
 > **Tool Mapping and Operational Protocol for Configured Cloud MCP Servers**  
-> **Source**: `<BRAIN_ROOT>\.agents\skills\mcp-orchestrator\reference\cloud_mcp_servers.md`  
-> **Configuration**: `<USER_HOME>\.gemini\config\mcp_config.json`
+> **Source**: `./.agents\skills\internal-tools\references\cloud_mcp_servers.md`  
+> **Configuration**: `C:\Users\User\.gemini\config\mcp_config.json`
 
 ---
 

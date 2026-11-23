@@ -301,7 +301,7 @@ def main():
     parser.add_argument("action", choices=["search", "stats", "inject", "sync"], help="Action to perform")
     parser.add_argument("query", nargs="?", default="", help="Query string for search or inject")
     parser.add_argument("--db", type=pathlib.Path, default=None, help="Custom path to project_memory.db")
-    parser.add_argument("--project", type=str, default="project-web", help="Project identifier")
+    parser.add_argument("--project", type=str, default="flh-one", help="Project identifier")
 
     args = parser.parse_args()
 
@@ -309,8 +309,8 @@ def main():
     if not db_path:
         for candidate in [
             pathlib.Path.cwd() / ".hermes" / "project_memory.db",
-            pathlib.Path(r"<USER_HOME>\Desktop\project-web\.hermes\project_memory.db"),
-            pathlib.Path(r"<BRAIN_ROOT>\.hermes\project_memory.db"),
+            pathlib.Path(r"C:\Users\User\Desktop\flh-one\.hermes\project_memory.db"),
+            pathlib.Path(r"./.hermes\project_memory.db"),
         ]:
             if candidate.exists():
                 db_path = candidate

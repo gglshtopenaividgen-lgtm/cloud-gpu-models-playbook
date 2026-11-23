@@ -1,7 +1,7 @@
 # REA CLI & Tools Reference
 
 > **Comprehensive Command Matrix for REA (Reverse Engineer Anything)**  
-> **Source**: `<BRAIN_ROOT>\.agents\skills\rea\references\cli-commands-reference.md`
+> **Source**: `./.agents\skills\rea\references\cli-commands-reference.md`
 
 ---
 

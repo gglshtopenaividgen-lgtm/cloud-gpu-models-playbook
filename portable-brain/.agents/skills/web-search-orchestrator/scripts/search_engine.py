@@ -5,9 +5,9 @@ Unified Multi-Tier Parallel Search & Web Intelligence Engine
 > ⛔ EXECUTION-FIRST MANDATE:
 > This is an executable CLI engine. NEVER call read_file or view_file on this script.
 > Always execute directly via run_command:
-> python <BRAIN_ROOT>\\.agents\\skills\\web-search-orchestrator\\scripts\\search_engine.py search "<query>" --engine parallel
+> python C:\\Users\\Flh\\Desktop\\brain\\.agents\\skills\\web-search-orchestrator\\scripts\\search_engine.py search "<query>" --engine parallel
 > Or for Deep Research:
-> python <BRAIN_ROOT>\\.agents\\skills\\web-search-orchestrator\\scripts\\search_engine.py deep-search "<topic>" -o temp_read/report.md
+> python C:\\Users\\Flh\\Desktop\\brain\\.agents\\skills\\web-search-orchestrator\\scripts\\search_engine.py deep-search "<topic>" -o temp_read/report.md
 
 Integrates TinyFish (Free live search & fetch), Tavily (Semantic AI Search),
 Firecrawl (Full JS scraping & crawling), and Gemini Deep Research prompt synthesis.
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 KEYS_FILE = Path.home() / ".gemini" / "antigravity" / "search_keys.json"
-AGENT_ONE_ENV = Path(r"<USER_HOME>\Desktop\project-web\.env.local")
+FLH_ONE_ENV = Path(r"C:\Users\User\Desktop\flh-one\.env.local")
 
 def load_keys() -> Dict[str, str]:
     keys = {
@@ -46,9 +46,9 @@ def load_keys() -> Dict[str, str]:
         except Exception:
             pass
 
-    if AGENT_ONE_ENV.exists():
+    if FLH_ONE_ENV.exists():
         try:
-            for line in AGENT_ONE_ENV.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for line in FLH_ONE_ENV.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = line.strip()
                 if line.startswith("TAVILY_API_KEY=") and not keys["tavily_api_key"]:
                     keys["tavily_api_key"] = line.split("=", 1)[1].strip().strip("\"'")
@@ -283,12 +283,19 @@ def execute_argon_deep_research(
     output_path: Optional[str] = None,
     auto_clean: bool = True,
     timeout_sec: int = 900,
+    model: Optional[str] = None,
+    thinking: Optional[str] = None,
+    mode: str = "chat",
 ) -> Dict[str, Any]:
     """
-    Executes autonomous Gemini Deep Research via Argon Bridge & shared fleet.
-    Auto-negotiates optimal idle profile, registers active lease, long-polls
-    multi-source investigation, saves Markdown report, and audits live quota.
+    Executes autonomous Gemini Deep Research ('4 Neon' High in Chat mode)
+    or parallel Task research ('4 Neon' High in Task mode) via Argon Bridge & shared fleet.
     """
+    mode_norm = (mode or "chat").strip().lower()
+    use_deep_research = (mode_norm == "chat")
+    target_model = model or "4 Neon"
+    target_thinking = (thinking or "High").title()
+
     try:
         from gemini_deep_research import run_autonomous_deep_research
         return run_autonomous_deep_research(
@@ -298,6 +305,9 @@ def execute_argon_deep_research(
             output_path=output_path,
             auto_clean=auto_clean,
             timeout_sec=timeout_sec,
+            model=target_model,
+            thinking=target_thinking,
+            mode=mode_norm,
         )
     except Exception as e:
         # Fallback to direct driver if runner import fails
@@ -309,7 +319,16 @@ def execute_argon_deep_research(
             driver = GeminiBrainDriver(default_profile=profile)
             sid = driver.create_session(new_chat=True, profile_dir=profile)
             prompt = build_gemini_research_prompt(topic, specific_goals=specific_goals or topic)
-            res = driver.ask(session_id=sid, prompt=prompt, deep_research=True, check_usage=True, timeout_sec=timeout_sec)
+            res = driver.ask(
+                session_id=sid,
+                prompt=prompt,
+                deep_research=use_deep_research,
+                model=target_model,
+                thinking=target_thinking,
+                mode=mode_norm,
+                check_usage=True,
+                timeout_sec=timeout_sec,
+            )
             if res.get("ok") and output_path:
                 p = Path(output_path)
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -418,11 +437,15 @@ def main():
     s_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
     # Deep Search sub-command (Autonomous Gemini Deep Research via Argon Bridge)
-    ds_parser = subparsers.add_parser("deep-search", aliases=["deep-research", "deep"], help="Execute autonomous Gemini Deep Research via Argon Bridge")
+    ds_parser = subparsers.add_parser("deep-search", aliases=["deep-research", "deep"], help="Execute autonomous Gemini Deep Research (4 Neon High) or Task research (4 Neon High Task) via Argon Bridge")
     ds_parser.add_argument("query", nargs="?", default=None, help="Deep research topic or question")
     ds_parser.add_argument("--status", action="store_true", help="Display live profile fleet visibility, active agent leases, and usage telemetry")
     ds_parser.add_argument("--goals", default=None, help="Specific technical goals or research vectors")
-    ds_parser.add_argument("--profile", default=None, help="Target specific Chrome profile (e.g. 'Profile 14', 'Profile 13'); auto-negotiates idle profile if omitted")
+    ds_parser.add_argument("--profile", default=None, help="Target specific Chrome profile (defaults to Waterfall Drain Tier 1 Alt Pool)")
+    ds_parser.add_argument("--model", default="4 Neon", help="Target Gemini Web model (default: '4 Neon' High; 4 Hydrogen/4 Carbon blocked)")
+    ds_parser.add_argument("--thinking", default="High", choices=["Low", "Medium", "High"], help="Thinking level (default: High)")
+    ds_parser.add_argument("--mode", default="chat", choices=["chat", "task"], help="Gemini segmented mode: 'chat' (Deep Research) or 'task' (parallel subagent Task research)")
+    ds_parser.add_argument("--task", action="store_true", help="Shortcut for --mode task (parallel cloud subagent research in 4 Neon High Task mode)")
     ds_parser.add_argument("--output", "-o", default=None, help="Save markdown dossier to output path in temp_read/")
     ds_parser.add_argument("--keep-chat", action="store_true", help="Retain chat thread in sidebar (disables auto-cleanup)")
     ds_parser.add_argument("--timeout", type=int, default=900, help="Deep research timeout in seconds (default: 900s)")
@@ -461,6 +484,7 @@ def main():
         if not args.query:
             ds_parser.error("A query or topic is required for deep-search, or pass --status")
 
+        effective_mode = "task" if getattr(args, "task", False) else args.mode
         res = execute_argon_deep_research(
             topic=args.query,
             specific_goals=args.goals,
@@ -468,12 +492,17 @@ def main():
             output_path=args.output,
             auto_clean=not args.keep_chat,
             timeout_sec=args.timeout,
+            model=args.model,
+            thinking=args.thinking,
+            mode=effective_mode,
         )
         if args.json:
             print(json.dumps(res, indent=2))
         elif res.get("ok"):
             print("\n" + "=" * 80)
-            print(f" ARGON DEEP RESEARCH DOSSIER (Profile: {res.get('profile')} | Duration: {res.get('duration_seconds')}s)")
+            res_model = (res.get("model") or args.model or "4 Hydrogen").upper()
+            res_mode = (res.get("mode") or effective_mode).upper()
+            print(f" GEMINI {res_model} [{res_mode}] RESEARCH DOSSIER (Profile: {res.get('profile')} | Duration: {res.get('duration_seconds')}s)")
             print("=" * 80)
             print(res.get("response"))
             print("=" * 80)

@@ -15,7 +15,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-BRAIN_DIR = Path(r"<BRAIN_ROOT>")
+BRAIN_DIR = Path(r"./")
 IDEAS_FILE = BRAIN_DIR / "ideas.md"
 MISTAKES_FILE = BRAIN_DIR / "mistakes.md"
 DEFAULT_DB = Path.home() / ".gemini" / "antigravity" / "hermes_global_memory.db"
@@ -95,7 +95,7 @@ def store_db_records(
 
 def main():
     parser = argparse.ArgumentParser(description="Hermes Pre-Compaction Memory Flush Protocol")
-    parser.add_argument("--project", default="universal", help="Target project name (e.g. brain, project-web, hi, sample-project)")
+    parser.add_argument("--project", default="universal", help="Target project name (e.g. brain, flh-one, hi, krpg)")
     parser.add_argument("--title", required=True, help="Title of current milestone or task")
     parser.add_argument("--summary", required=True, help="Summary of changes and accomplishments")
     parser.add_argument("--decision", default="", help="Architectural decision to append to ideas.md")

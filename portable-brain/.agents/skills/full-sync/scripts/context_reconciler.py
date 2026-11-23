@@ -17,7 +17,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-BRAIN_ROOT = Path(r"<BRAIN_ROOT>")
+BRAIN_ROOT = Path(r"./")
 
 IDEAS_TEMPLATE = """# {project_title} ARCHITECTURAL IDEAS & FEATURE ROADMAP
 
@@ -77,7 +77,7 @@ CONSTRAINTS_TEMPLATE = """# {project_title} DYNAMIC ARCHITECTURAL CONSTRAINTS
 RESOURCES_TEMPLATE = """# {project_title} RESOURCES & CREDENTIALS LEDGER
 
 > **Active cloud resources, endpoints, credentials, VM IPs, and database connections for {project_name}.**
-> **For universal multi-project master credentials, refer to `<BRAIN_ROOT>\resources.md`.**
+> **For universal multi-project master credentials, refer to `./resources.md`.**
 
 ---
 
@@ -160,7 +160,7 @@ USER_MODEL_TEMPLATE = """# Dialectical User Model & Preferences
 
 AGENTS_TEMPLATE = """# {project_title} Multi-Agent Operating Rules & Boundaries
 
-> **Source Rules**: `.agents/rules/` & `<BRAIN_ROOT>/.agents/rules/`
+> **Source Rules**: `.agents/rules/` & `./.agents/rules/`
 
 ---
 

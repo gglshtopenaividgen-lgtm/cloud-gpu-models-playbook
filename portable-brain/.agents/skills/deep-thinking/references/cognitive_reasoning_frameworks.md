@@ -77,7 +77,7 @@ Instead of asking *"How do we succeed?"*, ask:
 > **"What guarantees catastrophic, irreversible failure?"**
 
 Systematically map the anti-goals:
-1. Overwriting or wiping permanent context files in `<BRAIN_ROOT>`.
+1. Overwriting or wiping permanent context files in `./`.
 2. Spawning defective subagents (`DeepCoder`/`DeepInvestigator`) that fail with missing tool dependencies.
 3. Incurring unexpected cloud charges by provisioning public IPv4 addresses on VMs.
 4. Exhausting free-tier limits (e.g., writing rich-text ASTs to 500MB Supabase DB).
@@ -207,38 +207,38 @@ The `deep-thinking` skill bundles three zero-dependency Python CLI tools in `scr
 ### 1. `decision_matrix.py` (MCDA, TOPSIS & FMEA)
 ```powershell
 # Run MCDA analysis on custom JSON or built-in demo
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\decision_matrix.py score --demo
+python ./.agents\skills\deep-thinking\scripts\decision_matrix.py score --demo
 
 # Run FMEA failure mode analysis and calculate RPN
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\decision_matrix.py fmea --demo
+python ./.agents\skills\deep-thinking\scripts\decision_matrix.py fmea --demo
 
 # Generate Trilemma Trade-Off Matrix (Latency vs Cost vs Quality)
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\decision_matrix.py tradeoff
+python ./.agents\skills\deep-thinking\scripts\decision_matrix.py tradeoff
 ```
 
 ### 2. `structured_brainstorm.py` (Lateral Ideation Suite)
 ```powershell
 # SCAMPER ideation prompt generator
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\structured_brainstorm.py scamper --topic "<system>"
+python ./.agents\skills\deep-thinking\scripts\structured_brainstorm.py scamper --topic "<system>"
 
 # Six Thinking Hats cognitive decomposition
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\structured_brainstorm.py sixhats --topic "<decision>"
+python ./.agents\skills\deep-thinking\scripts\structured_brainstorm.py sixhats --topic "<decision>"
 
 # Munger Inversion anti-goal analyzer
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\structured_brainstorm.py inversion --topic "<feature>"
+python ./.agents\skills\deep-thinking\scripts\structured_brainstorm.py inversion --topic "<feature>"
 
 # TRIZ software contradiction matrix resolver
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\structured_brainstorm.py triz --contradiction autonomy_vs_safety
+python ./.agents\skills\deep-thinking\scripts\structured_brainstorm.py triz --contradiction autonomy_vs_safety
 ```
 
 ### 3. `rca_drilldown.py` (Root Cause Analysis Engine)
 ```powershell
 # 5-Whys recursive trace
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\rca_drilldown.py five_whys --demo
+python ./.agents\skills\deep-thinking\scripts\rca_drilldown.py five_whys --demo
 
 # Ishikawa 6M fishbone diagram (Mermaid + Markdown)
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\rca_drilldown.py ishikawa --demo
+python ./.agents\skills\deep-thinking\scripts\rca_drilldown.py ishikawa --demo
 
 # Fault Tree Analysis with boolean gates and cut sets
-python <BRAIN_ROOT>\.agents\skills\deep-thinking\scripts\rca_drilldown.py fault_tree --demo
+python ./.agents\skills\deep-thinking\scripts\rca_drilldown.py fault_tree --demo
 ```

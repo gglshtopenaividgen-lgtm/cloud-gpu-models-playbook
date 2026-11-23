@@ -1,0 +1,15 @@
+{
+  "auto-skill": {},
+  "browser-operator": {"preview_url": "local_url", "verify_cmd": "id"},
+  "deep-thinking": {"review_mode": ["architecture", "diagnostic", "research"], "storage_policy": "path", "verify_cmd": "id"},
+  "document-forge": {"output_dir": "path", "verify_cmd": "id"},
+  "exhaustive-audit-and-repair": {"verify_cmd": "id", "preview_url": "local_url", "immutable_path": "path"},
+  "external-resource": {"workload_profile": "id", "preflight_required": "boolean", "output_dir": "path"},
+  "full-sync": {"verify_cmd": "id"},
+  "hermes-agent-core": {"memory_namespace": "id"},
+  "internal-tools": {"stack": "id", "verify_cmd": "id"},
+  "offload": {"board_mode": ["explicit"], "verify_cmd": "id"},
+  "rea": {"analysis_mode": ["offline-authorized", "static"], "verify_cmd": "id"},
+  "ui-design-engine": {"stack": "id", "verify_cmd": "id", "preview_url": "local_url"},
+  "web-search-orchestrator": {"verify_cmd": "id"}
+}

@@ -28,53 +28,54 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-BRAIN_ROOT = Path(r"<BRAIN_ROOT>")
+BRAIN_ROOT = Path(r"./")
 HERMES_SCRIPTS = BRAIN_ROOT / ".agents" / "skills" / "hermes-agent-core" / "scripts"
 if str(HERMES_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(HERMES_SCRIPTS))
 
 # Project routing map (from brain/project_map.md)
 PROJECT_REGISTRY: Dict[str, Dict[str, str]] = {
-    "project-web": {
-        "root": r"<USER_HOME>\Desktop\project-web",
-        "tags": "project-web,srm,portal,next,tiptap,supabase,vm1,vm2,litellm",
+    "flh-one": {
+        "root": r"C:\Users\User\Desktop\flh-one",
+        "tags": "flh-one,srm,portal,next,tiptap,supabase,vm1,vm2,litellm",
     },
     "hi": {
-        "root": r"<WORKSPACE_ROOT>",
+        "root": r"C:\Users\User\Desktop\PJCT\hi",
         "tags": "hi,kaggle,colab,modal,gpu,tpu,t4,gguf,sdxl,gradio,abliterated",
     },
-    "sample-project": {
-        "root": r"<WORKSPACE_ROOT>",
-        "tags": "awaken1,sample-project,seoul,manhwa,threejs,ccd,winskel,npc,causality",
+    "AWAKEN1": {
+        "root": r"C:\Users\User\Desktop\PJCT\AWAKEN1",
+        "tags": "awaken1,krpg,seoul,manhwa,threejs,ccd,winskel,npc,causality",
     },
-    "project-audio": {
-        "root": r"<USER_HOME>\Desktop\appwrite\project-audio",
-        "tags": "project-audio,music,audio,dsp,eq,harman,lrclib,lyrics,appwrite,spotify",
+    "flh-music": {
+        "root": r"C:\Users\User\Desktop\appwrite\flh-music",
+        "tags": "flh-music,music,audio,dsp,eq,harman,lrclib,lyrics,appwrite,spotify",
     },
-    "sample-project": {
-        "root": r"<WORKSPACE_ROOT>",
-        "tags": "sample-project,minecraft,paper,fabric,geyser,floodgate,ver_backup",
+    "mineserver": {
+        "root": r"C:\Users\User\Desktop\PJCT\mineserver",
+        "tags": "mineserver,minecraft,paper,fabric,geyser,floodgate,ver_backup",
     },
     "cult_game": {
-        "root": r"<WORKSPACE_ROOT>",
+        "root": r"C:\Users\User\Desktop\PJCT\cult_game",
         "tags": "cult_game,cultivator,xianxia,isometric,seelie,realm",
     },
     "custom_tools": {
-        "root": r"<WORKSPACE_ROOT>",
+        "root": r"C:\Users\User\Desktop\PJCT\custom_tools",
         "tags": "custom_tools,api_router,gateway,vertex,maas,md-view,vlc,bulk_generator",
     },
-    "sample-project": {
-        "root": r"<PORTABLE_BRAIN_DIR>\sample-project",
+    "PKREA": {
+        "root": r"<PROJECTS_ROOT>\PKREA",
         "tags": "pkrea,rea,reverse,binary,disassembly,deobfuscation,apk,wasm",
     },
     "brain": {
-        "root": r"<BRAIN_ROOT>",
+        "root": r"./",
         "tags": "brain,argon,gemini,skill,subagent,hermes,search,driver,bridge,profile",
     },
 }
@@ -131,8 +132,8 @@ def detect_active_project(prompt: str, explicit_project: Optional[str] = None, c
         for k in PROJECT_REGISTRY:
             if k.lower() == explicit_project.lower():
                 return k
-        if explicit_project.lower() == "sample-project":
-            return "sample-project"
+        if explicit_project.lower() == "krpg":
+            return "AWAKEN1"
 
     work_dir = os.path.abspath(cwd or os.getcwd()).lower()
     for proj, info in PROJECT_REGISTRY.items():
@@ -159,14 +160,14 @@ def is_foreign_project_section(header: str, body: str, active_project: str) -> b
     """Returns True if a markdown section explicitly belongs to a different project."""
     combined = header.lower()
     foreign_markers = {
-        "project-web": ["(project-web)", "[project-web", "srm student portal", "srm_cards"],
+        "flh-one": ["(flh-one)", "[flh-one", "srm student portal", "srm_cards"],
         "hi": ["(hi)", "[hi synced", "(kaggle/hi)"],
-        "sample-project": ["(sample-project)", "[sample-project synced", "(awaken1)", "chrono awakening"],
-        "project-audio": ["(project-audio)", "[project-audio synced", "apple music lyrics-first"],
-        "sample-project": ["(sample-project)", "papermc"],
+        "AWAKEN1": ["(krpg)", "[krpg synced", "(awaken1)", "chrono awakening"],
+        "flh-music": ["(flh-music)", "[flh music synced", "apple music lyrics-first"],
+        "mineserver": ["(mineserver)", "papermc"],
         "cult_game": ["(cult_game)", "eternal cultivator"],
         "custom_tools": ["(custom_tools)", "[custom_tools synced"],
-        "sample-project": ["(pkrea)"],
+        "PKREA": ["(pkrea)"],
     }
     for proj, markers in foreign_markers.items():
         if proj.lower() == active_project.lower():
@@ -489,6 +490,102 @@ def slice_code_file(
     }
 
 
+def compress_code_content(content: str, file_path: str = "") -> str:
+    """
+    Compresses code or markdown content by stripping verbose comments/whitespace
+    and extracting structural symbol outlines (repomix / Python-outline style).
+    """
+    ext = Path(file_path).suffix.lower() if file_path else ""
+
+    # Strategy 1: Python AST Symbol Outline Compression
+    if ext == ".py":
+        has_line_nums = bool(re.search(r"^\s*\d+\s*\|\s*", content, re.MULTILINE))
+        clean_src = re.sub(r"^\s*\d+\s*\|\s*", "", content, flags=re.MULTILINE) if has_line_nums else content
+        try:
+            tree = ast.parse(clean_src)
+            outlines: List[str] = []
+            for node in tree.body:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    outlines.append(ast.unparse(node))
+                elif isinstance(node, ast.ClassDef):
+                    bases = [ast.unparse(b) for b in node.bases]
+                    base_str = f"({', '.join(bases)})" if bases else ""
+                    outlines.append(f"class {node.name}{base_str}:")
+                    doc = ast.get_docstring(node)
+                    if doc:
+                        outlines.append(f'    """{doc[:120].strip()}"""')
+                    for item in node.body:
+                        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            prefix = "async def" if isinstance(item, ast.AsyncFunctionDef) else "def"
+                            args_str = ast.unparse(item.args)
+                            ret_str = f" -> {ast.unparse(item.returns)}" if item.returns else ""
+                            outlines.append(f"    {prefix} {item.name}({args_str}){ret_str}: ...")
+                            mdoc = ast.get_docstring(item)
+                            if mdoc:
+                                outlines.append(f'        """{mdoc[:80].strip()}"""')
+                        elif isinstance(item, ast.AnnAssign):
+                            outlines.append(f"    {ast.unparse(item)}")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                    args_str = ast.unparse(node.args)
+                    ret_str = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+                    outlines.append(f"{prefix} {node.name}({args_str}){ret_str}: ...")
+                    fdoc = ast.get_docstring(node)
+                    if fdoc:
+                        outlines.append(f'    """{fdoc[:100].strip()}"""')
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    assign_str = ast.unparse(node)
+                    if len(assign_str) < 140:
+                        outlines.append(assign_str)
+            if outlines:
+                return "\n".join(outlines)
+        except Exception:
+            pass
+
+    # Strategy 2: Regex / Token structural comment & whitespace stripper
+    has_line_nums = bool(re.search(r"^\s*\d+\s*\|\s*", content, re.MULTILINE))
+    lines = content.splitlines()
+    processed_lines = []
+    in_block_comment = False
+
+    for line in lines:
+        raw_code = re.sub(r"^\s*\d+\s*\|\s*", "", line) if has_line_nums else line
+        stripped = raw_code.strip()
+
+        # Multiline comment handling
+        if in_block_comment:
+            if "*/" in stripped:
+                in_block_comment = False
+            continue
+        if stripped.startswith("/*"):
+            if "*/" not in stripped:
+                in_block_comment = True
+            continue
+
+        # Skip standalone single-line comments (# or //)
+        if stripped.startswith("#") and not stripped.startswith("#!") and not stripped.startswith("# ---"):
+            continue
+        if stripped.startswith("//"):
+            continue
+
+        # Strip inline comments
+        if "//" in raw_code and not ('"' in raw_code or "'" in raw_code):
+            raw_code = raw_code.split("//", 1)[0].rstrip()
+        elif "#" in raw_code and not ('"' in raw_code or "'" in raw_code or raw_code.strip().startswith("#")):
+            raw_code = raw_code.split("#", 1)[0].rstrip()
+
+        # Collapse whitespace
+        if not raw_code.strip():
+            if processed_lines and processed_lines[-1] != "":
+                processed_lines.append("")
+        else:
+            processed_lines.append(raw_code.rstrip())
+
+    result = "\n".join(processed_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result).strip()
+    return result
+
+
 def auto_discover_files_in_prompt(prompt: str, active_project: str, cwd: Optional[str] = None) -> List[str]:
     """Detects file paths or script names referenced inside the prompt."""
     found = []
@@ -587,6 +684,7 @@ def build_selective_context_bundle(
     output_path: Optional[str] = None,
     max_total_chars: int = 24000,
     cwd: Optional[str] = None,
+    compress: bool = False,
 ) -> Tuple[str, Dict]:
     """
     Executes the 6-Stage Selective Context-Packing Pipeline and writes a compact,
@@ -665,6 +763,10 @@ def build_selective_context_bundle(
         sliced = slice_code_file(spec, query_tokens=query_tokens, cwd=cwd, max_file_chars=per_file_budget)
         if sliced:
             raw_bytes_scanned += sliced["raw_chars"]
+            if compress:
+                compressed_content = compress_code_content(sliced["content"], sliced["path"])
+                sliced["content"] = compressed_content
+                sliced["mode"] += " [compressed]"
             code_slices.append(sliced)
 
     # 7. Shadow Session History (if continuing a multi-turn session)
@@ -731,16 +833,31 @@ def build_selective_context_bundle(
             parts.append("")
 
     bundle_text = "\n".join(parts)
+    if compress:
+        bundle_text = re.sub(r"\n{3,}", "\n\n", bundle_text)
+
     if len(bundle_text) > max_total_chars:
         bundle_text = bundle_text[:max_total_chars].rsplit("\n", 1)[0] + "\n\n...[Bundle capped at max_total_chars budget]...\n"
+
+    # Enforce 2-layer secret redaction (regex + exact .env* values) before writing bundle
+    full_sync_scripts = BRAIN_ROOT / ".agents" / "skills" / "full-sync" / "scripts"
+    if str(full_sync_scripts) not in sys.path:
+        sys.path.insert(0, str(full_sync_scripts))
+    try:
+        import offload_context_compiler as occ
+        proj_root = Path(PROJECT_REGISTRY.get(active_project, {}).get("root", str(BRAIN_ROOT)))
+        bundle_text, _ = occ.redact_two_layer(bundle_text, roots=[proj_root, BRAIN_ROOT])
+    except Exception:
+        pass
 
     reduction_pct = (
         round((1.0 - (len(bundle_text) / max(1, raw_bytes_scanned))) * 100.0, 1)
         if raw_bytes_scanned > len(bundle_text)
         else 0.0
     )
+    compress_tag = " (Compressed)" if compress else ""
     header_stats = (
-        f"- **Compression Telemetry**: Scanned `{raw_bytes_scanned:,}` chars across ledgers/code -> "
+        f"- **Compression Telemetry{compress_tag}**: Scanned `{raw_bytes_scanned:,}` chars across ledgers/code -> "
         f"Packed `{len(bundle_text):,}` chars (`{reduction_pct}%` noise reduction)\n"
     )
     bundle_text = bundle_text.replace(
@@ -765,6 +882,7 @@ def build_selective_context_bundle(
         "raw_chars_scanned": raw_bytes_scanned,
         "bundle_chars": len(bundle_text),
         "noise_reduction_pct": reduction_pct,
+        "compressed": compress,
         "hermes_memories_count": len(hermes_memories),
         "ideas_selected": f"{len(top_ideas)}/{len(ideas_sections)}",
         "mistakes_selected": f"{len(top_mistakes)}/{len(mistakes_sections)}",
@@ -783,6 +901,7 @@ if __name__ == "__main__":
     p.add_argument("--session-id", default=None, help="Optional multi-turn session ID")
     p.add_argument("--output", "-o", default=None, help="Custom output bundle path")
     p.add_argument("--max-chars", type=int, default=24000, help="Hard character budget for bundle")
+    p.add_argument("--compress", "-c", action="store_true", help="Compress code & text context by stripping verbose comments/whitespace and extracting symbol outlines (repomix-style outline)")
     args = p.parse_args()
 
     bpath, stats = build_selective_context_bundle(
@@ -792,5 +911,6 @@ if __name__ == "__main__":
         session_id=args.session_id,
         output_path=args.output,
         max_total_chars=args.max_chars,
+        compress=args.compress,
     )
     print(json.dumps(stats, indent=2))

@@ -59,9 +59,9 @@ AI slop is generic, low-effort interface output that immediately reads as a temp
 ## 4. Project-Specific Design Archives
 
 For full component design guides, CSS variables, and theme palettes:
-* **project-web (14 Living Themes)**: [`projects/project-web/slop.md`](file:///<BRAIN_ROOT>/projects/project-web/slop.md)
-* **PJCT/hi (Mobile Studio PWA)**: [`projects/hi/compute_and_game_dev_guide.md`](file:///<BRAIN_ROOT>/projects/hi/compute_and_game_dev_guide.md)
-* **PJCT/sample-project (2.5D Pixel Aesthetic)**: [`projects/sample-project/district_graphics.md`](file:///<BRAIN_ROOT>/projects/sample-project/district_graphics.md)
+* **FLH-ONE (14 Living Themes)**: [`projects/flh-one/slop.md`](file:///./projects/flh-one/slop.md)
+* **PJCT/hi (Mobile Studio PWA)**: [`projects/hi/compute_and_game_dev_guide.md`](file:///./projects/hi/compute_and_game_dev_guide.md)
+* **PJCT/krpg (2.5D Pixel Aesthetic)**: [`projects/krpg/district_graphics.md`](file:///./projects/krpg/district_graphics.md)
 
 ---
 

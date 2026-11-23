@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "safe_dismiss_labels": [
+    "close",
+    "dismiss",
+    "no thanks",
+    "not now",
+    "skip",
+    "got it",
+    "ok",
+    "maybe later",
+    "no, thanks",
+    "×",
+    "x"
+  ],
+  "forbidden_labels": [
+    "connect drive",
+    "connect google drive",
+    "turn on",
+    "accept",
+    "upgrade",
+    "allow",
+    "sign in",
+    "delete",
+    "continue",
+    "subscribe",
+    "get started",
+    "try ultra",
+    "enable"
+  ],
+  "known_selectors": [
+    {
+      "surface": "gemini_web",
+      "selector": "button[aria-label='Close'], mat-dialog-container button[mat-dialog-close]",
+      "note": "Gemini Web promo / periodic table modal dismiss"
+    },
+    {
+      "surface": "aistudio",
+      "selector": "mat-dialog-container button[aria-label='Close'], .cdk-overlay-pane button[aria-label='Close']",
+      "note": "AI Studio promo / announcement dialog dismiss"
+    }
+  ]
+}

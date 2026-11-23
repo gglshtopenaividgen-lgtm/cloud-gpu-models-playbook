@@ -8,7 +8,7 @@
 
 | Tier | Location | Scope & Rules |
 |---|---|---|
-| **Universal Skills** | `<BRAIN_ROOT>\.agents\skills/<skill-name>/` | • 100% project-agnostic powerhouses.<br>• Allowed to be invoked from ANY project.<br>• Exactly 12 master powerhouses. |
+| **Universal Skills** | `./.agents\skills/<skill-name>/` | • 100% project-agnostic powerhouses.<br>• Allowed to be invoked from ANY project.<br>• Exactly 12 master powerhouses. |
 | **Project-Specific Skills** | `<project>/.agents/skills/<skill-name>/` | • Authorized ONLY within the active project workspace.<br>• Backup copy stored in `brain/project_skills/<project>/<skill-name>/`.<br>• NEVER placed in `brain/.agents/skills/`. |
 
 ---

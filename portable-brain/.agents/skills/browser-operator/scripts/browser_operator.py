@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import hmac
+import io
 import json
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -28,6 +32,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+VERSION = "3.1.0"
 BRIDGE_URL = os.environ.get("ARGON_BRIDGE_URL", "http://127.0.0.1:9229")
 SKILL_DIR = Path(__file__).resolve().parent.parent
 ARGON_BRIDGE_DIR = SKILL_DIR / "argon_bridge"
@@ -1240,34 +1245,66 @@ def perform_scroll_find(
     return {"ok": False, "error": f"Exceeded max_steps ({max_steps}) scanning '{container}'"}
 
 
+def _cdp_set_file_input_files(
+    profile: str,
+    tab_id: int,
+    abs_files: List[str],
+    selector: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Attaches files directly to <input type='file'> via CDP DOM.setFileInputFiles."""
+    cdp_send("DOM.enable", {}, profile=profile, tab_id=tab_id)
+    doc_res = cdp_send("DOM.getDocument", {"depth": -1, "pierce": True}, profile=profile, tab_id=tab_id)
+    root_node_id = doc_res.get("result", {}).get("root", {}).get("nodeId")
+    if not root_node_id:
+        return {"ok": False, "error": "Failed to inspect DOM document root via CDP"}
+
+    selectors = [selector] if selector else [
+        '.ant-modal input[type="file"]',
+        '[role="dialog"] input[type="file"]',
+        'input[type="file"]',
+    ]
+    node_id = 0
+    matched_selector = None
+    for css_sel in selectors:
+        if not css_sel:
+            continue
+        q_res = cdp_send("DOM.querySelector", {"nodeId": root_node_id, "selector": css_sel}, profile=profile, tab_id=tab_id)
+        node_id = q_res.get("result", {}).get("nodeId", 0)
+        if node_id:
+            matched_selector = css_sel
+            break
+
+    if not node_id:
+        return {"ok": False, "error": f"No matching <input type='file'> node found (tried: {selectors})"}
+
+    set_res = cdp_send("DOM.setFileInputFiles", {"nodeId": node_id, "files": abs_files}, profile=profile, tab_id=tab_id)
+    if set_res.get("ok"):
+        return {"ok": True, "tier": "direct-cdp", "selector": matched_selector, "files": abs_files}
+    return {"ok": False, "error": set_res.get("error") or "DOM.setFileInputFiles returned failure"}
+
+
 def perform_upload(
     profile: str,
     tab_id: int,
     files: List[str],
     selector: Optional[str] = None,
     intercept: bool = False,
+    direct_cdp: bool = False,
     trigger: Optional[str] = None,
     accelerator: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """3-tier file upload: Direct CDP DOM.setFileInputFiles OR file-chooser intercept + picker stub."""
+    """3-tier file upload: Direct CDP DOM.setFileInputFiles OR file-chooser intercept + fallback."""
     abs_files = [str(Path(f).resolve()) for f in files]
     missing = [f for f in abs_files if not Path(f).exists()]
     if missing:
         return {"ok": False, "error": f"Files not found: {missing}"}
 
-    if not intercept:
-        # Tier 1: Direct <input type="file"> via CDP DOM.getDocument -> DOM.querySelector -> DOM.setFileInputFiles
-        cdp_send("DOM.enable", {}, profile=profile, tab_id=tab_id)
-        doc_res = cdp_send("DOM.getDocument", {"depth": -1, "pierce": True}, profile=profile, tab_id=tab_id)
-        root_node_id = doc_res.get("result", {}).get("root", {}).get("nodeId")
-        if root_node_id:
-            css_sel = selector or 'input[type="file"]'
-            q_res = cdp_send("DOM.querySelector", {"nodeId": root_node_id, "selector": css_sel}, profile=profile, tab_id=tab_id)
-            node_id = q_res.get("result", {}).get("nodeId", 0)
-            if node_id:
-                set_res = cdp_send("DOM.setFileInputFiles", {"nodeId": node_id, "files": abs_files}, profile=profile, tab_id=tab_id)
-                if set_res.get("ok"):
-                    return {"ok": True, "tier": "direct-cdp", "files": abs_files}
+    if direct_cdp or not intercept:
+        direct_res = _cdp_set_file_input_files(profile, tab_id, abs_files, selector=selector)
+        if direct_res.get("ok"):
+            return direct_res
+        if direct_cdp:
+            return direct_res
 
     # Tier 2 / 3: Stub window.showOpenFilePicker & use extension UPLOAD_FILES file-chooser interception
     eval_tab_js("try { window.showOpenFilePicker = undefined; } catch(e) {}", profile=profile, tab_id=tab_id)
@@ -1303,7 +1340,553 @@ def perform_upload(
         profile=profile,
         timeout=20.0,
     )
+    if res.get("ok"):
+        return res
+
+    # Fallback: if file-chooser interception timed out (e.g. missing userGesture) but DOM input appeared, attach via CDP
+    fallback_res = _cdp_set_file_input_files(profile, tab_id, abs_files, selector=selector)
+    if fallback_res.get("ok"):
+        fallback_res["tier"] = "direct-cdp-fallback"
+        fallback_res["prior_error"] = res.get("error")
+        return fallback_res
     return res
+
+
+def build_xhr_spy_install_js() -> str:
+    """Builds the idempotent XMLHttpRequest & fetch live progress spy script."""
+    return r"""
+(() => {
+  if (!window.__boXhrSpy) {
+    window.__boXhrSpy = { installed: false, seq: 0, logs: [] };
+  }
+  window.__xhrLog = window.__boXhrSpy.logs;
+  if (window.__boXhrSpy.installed) {
+    return { status: 'already_installed', count: window.__boXhrSpy.logs.length };
+  }
+  window.__boXhrSpy.installed = true;
+
+  const pushRec = (rec) => {
+    const logs = window.__boXhrSpy.logs;
+    logs.push(rec);
+    if (logs.length > 200) logs.splice(0, logs.length - 200);
+  };
+
+  const origOpen = XMLHttpRequest.prototype.open;
+  const origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this.__boSpyRec = {
+      id: ++window.__boXhrSpy.seq,
+      kind: 'xhr',
+      method: String(method || 'GET').toUpperCase(),
+      url: String(url || ''),
+      t0: Date.now(),
+      elapsed_ms: 0,
+      elapsed_s: 0.0,
+      loaded: 0,
+      total: 0,
+      pct: 0.0,
+      status: null,
+      state: 'open',
+      response_preview: '',
+      events: []
+    };
+    return origOpen.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function() {
+    const rec = this.__boSpyRec;
+    if (rec) {
+      rec.t0 = Date.now();
+      rec.state = 'sending';
+      rec.events.push({ ev: 'send', dt: 0 });
+      pushRec(rec);
+      let lastProg = 0;
+
+      if (this.upload && this.upload.addEventListener) {
+        this.upload.addEventListener('progress', (e) => {
+          const dt = Date.now() - rec.t0;
+          rec.elapsed_ms = dt;
+          rec.elapsed_s = Math.round(dt / 100) / 10;
+          rec.loaded = e.loaded || 0;
+          rec.total = e.total || 0;
+          rec.pct = e.total > 0 ? Math.round((e.loaded / e.total) * 1000) / 10 : 0.0;
+          if (dt - lastProg >= 400 || (e.total > 0 && e.loaded >= e.total)) {
+            lastProg = dt;
+            rec.events.push({ ev: 'upload.progress', dt, loaded: rec.loaded, total: rec.total, pct: rec.pct });
+            if (rec.events.length > 80) rec.events.splice(1, rec.events.length - 80);
+          }
+        });
+        this.upload.addEventListener('load', () => {
+          const dt = Date.now() - rec.t0;
+          rec.elapsed_ms = dt;
+          rec.elapsed_s = Math.round(dt / 100) / 10;
+          rec.state = 'upload_complete';
+          rec.events.push({ ev: 'upload.load', dt, loaded: rec.loaded, total: rec.total, pct: 100.0 });
+        });
+        this.upload.addEventListener('error', () => {
+          const dt = Date.now() - rec.t0;
+          rec.elapsed_ms = dt;
+          rec.state = 'upload_error';
+          rec.events.push({ ev: 'upload.error', dt });
+        });
+        this.upload.addEventListener('abort', () => {
+          const dt = Date.now() - rec.t0;
+          rec.elapsed_ms = dt;
+          rec.state = 'upload_abort';
+          rec.events.push({ ev: 'upload.abort', dt });
+        });
+      }
+
+      this.addEventListener('load', () => {
+        const dt = Date.now() - rec.t0;
+        rec.elapsed_ms = dt;
+        rec.elapsed_s = Math.round(dt / 100) / 10;
+        rec.status = this.status;
+        rec.state = 'done';
+        try {
+          rec.response_preview = (this.responseType === '' || this.responseType === 'text')
+            ? String(this.responseText || '').slice(0, 500)
+            : ('[' + this.responseType + ']');
+        } catch (err) {
+          rec.response_preview = '[unreadable]';
+        }
+        rec.events.push({ ev: 'load', dt, status: this.status });
+      });
+      this.addEventListener('error', () => {
+        const dt = Date.now() - rec.t0;
+        rec.elapsed_ms = dt;
+        rec.elapsed_s = Math.round(dt / 100) / 10;
+        rec.status = this.status || -1;
+        rec.state = 'error';
+        rec.events.push({ ev: 'error', dt, status: rec.status });
+      });
+      this.addEventListener('abort', () => {
+        const dt = Date.now() - rec.t0;
+        rec.elapsed_ms = dt;
+        rec.status = -2;
+        rec.state = 'abort';
+        rec.events.push({ ev: 'abort', dt });
+      });
+      this.addEventListener('timeout', () => {
+        const dt = Date.now() - rec.t0;
+        rec.elapsed_ms = dt;
+        rec.status = -3;
+        rec.state = 'timeout';
+        rec.events.push({ ev: 'timeout', dt });
+      });
+    }
+    return origSend.apply(this, arguments);
+  };
+
+  if (typeof window.fetch === 'function') {
+    const origFetch = window.fetch.bind(window);
+    window.fetch = function(input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url ? input.url : String(input || ''));
+      const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      const rec = {
+        id: ++window.__boXhrSpy.seq,
+        kind: 'fetch',
+        method,
+        url,
+        t0: Date.now(),
+        elapsed_ms: 0,
+        elapsed_s: 0.0,
+        loaded: 0,
+        total: 0,
+        pct: null,
+        status: null,
+        state: 'pending',
+        response_preview: '',
+        events: [{ ev: 'fetch.start', dt: 0 }]
+      };
+      pushRec(rec);
+      return origFetch(input, init).then(
+        (res) => {
+          const dt = Date.now() - rec.t0;
+          rec.elapsed_ms = dt;
+          rec.elapsed_s = Math.round(dt / 100) / 10;
+          rec.status = res.status;
+          rec.state = 'done';
+          rec.events.push({ ev: 'fetch.load', dt, status: res.status });
+          try {
+            res.clone().text().then((txt) => {
+              rec.response_preview = String(txt || '').slice(0, 500);
+            }).catch(() => {});
+          } catch (e) {}
+          return res;
+        },
+        (err) => {
+          const dt = Date.now() - rec.t0;
+          rec.elapsed_ms = dt;
+          rec.elapsed_s = Math.round(dt / 100) / 10;
+          rec.status = -1;
+          rec.state = 'error';
+          rec.response_preview = String(err || '');
+          rec.events.push({ ev: 'fetch.error', dt });
+          throw err;
+        }
+      );
+    };
+  }
+  return { status: 'installed', count: window.__boXhrSpy.logs.length };
+})();
+"""
+
+
+def perform_xhr_spy(
+    profile: str,
+    tab_id: int,
+    install: bool = False,
+    status: bool = False,
+    clear: bool = False,
+    url_filter: Optional[str] = None,
+    refresh_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Installs, reads, or clears live XHR/fetch upload progress telemetry (plus optional session refresh)."""
+    out: Dict[str, Any] = {"ok": True}
+
+    if clear:
+        c_res = eval_tab_js(
+            "(() => { if (window.__boXhrSpy) { window.__boXhrSpy.logs.length = 0; } if (Array.isArray(window.__xhrLog)) { window.__xhrLog.length = 0; } return { cleared: true }; })()",
+            profile=profile,
+            tab_id=tab_id,
+        )
+        out["clear"] = c_res
+
+    if install or (not status and not clear and not refresh_url):
+        i_res = eval_tab_js(build_xhr_spy_install_js(), profile=profile, tab_id=tab_id)
+        if not isinstance(i_res, dict) or "__eval_error__" in i_res:
+            return {"ok": False, "error": f"Failed to install XHR spy: {i_res}"}
+        out["spy"] = i_res
+
+    if refresh_url:
+        rf_js = f"""
+        (async () => {{
+          const cookies = document.cookie ? document.cookie.split('; ') : [];
+          const csrfPair = cookies.find(c => /csrf|xsrf/i.test(c.split('=')[0] || ''));
+          const csrfVal = csrfPair ? decodeURIComponent(csrfPair.split('=').slice(1).join('=') || '') : '';
+          const headers = {{ 'Content-Type': 'application/json' }};
+          if (csrfVal) headers['X-CSRF-Token'] = csrfVal;
+          const res = await fetch({json.dumps(refresh_url)}, {{
+            method: 'POST',
+            credentials: 'include',
+            headers,
+            body: '{{}}'
+          }});
+          const text = await res.text().catch(() => '');
+          return {{ ok: res.ok, status: res.status, body: text.slice(0, 500) }};
+        }})()
+        """
+        out["refresh"] = eval_tab_js(rf_js, profile=profile, tab_id=tab_id, timeout=15.0)
+
+    if status:
+        s_js = f"""
+        (() => {{
+          const installed = !!(window.__boXhrSpy && window.__boXhrSpy.installed);
+          const raw = (window.__boXhrSpy && Array.isArray(window.__boXhrSpy.logs))
+            ? window.__boXhrSpy.logs
+            : (Array.isArray(window.__xhrLog) ? window.__xhrLog : []);
+          const needle = {json.dumps((url_filter or '').lower())};
+          const filtered = needle ? raw.filter(r => String(r.url || '').toLowerCase().includes(needle)) : raw;
+          const summary = filtered.map(r => {{
+            const evs = Array.isArray(r.events) ? r.events : [];
+            const lastEv = evs.length ? evs[evs.length - 1] : null;
+            const liveElapsed = (r.state === 'sending' || r.state === 'pending' || r.state === 'upload_complete') && r.t0
+              ? Math.round((Date.now() - r.t0) / 100) / 10
+              : r.elapsed_s;
+            return {{
+              id: r.id,
+              kind: r.kind,
+              method: r.method,
+              url: r.url,
+              state: r.state,
+              status: r.status,
+              loaded: r.loaded,
+              total: r.total,
+              pct: r.pct,
+              elapsed_s: liveElapsed,
+              last_event: lastEv,
+              response_preview: r.response_preview || ''
+            }};
+          }});
+          return {{ installed, total_captured: raw.length, matched: summary.length, requests: summary }};
+        }})()
+        """
+        s_res = eval_tab_js(s_js, profile=profile, tab_id=tab_id)
+        if not isinstance(s_res, dict) or "__eval_error__" in s_res:
+            return {"ok": False, "error": f"Failed reading XHR spy status: {s_res}"}
+        out.update(s_res)
+
+    return out
+
+
+def generate_totp_code(secret: str) -> Tuple[str, int]:
+    """Computes current 6-digit RFC 6238 TOTP code and remaining seconds in the 30s window."""
+    cleaned = secret.strip().replace(" ", "").upper()
+    pad = (-len(cleaned)) % 8
+    key = base64.b32decode(cleaned + ("=" * pad))
+    now = time.time()
+    step = int(now // 30)
+    msg = struct.pack(">Q", step)
+    digest = hmac.new(key, msg, hashlib.sha1).digest()
+    offset = digest[19] & 0x0F
+    code_int = (struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+    remaining = 30 - int(now % 30)
+    return f"{code_int:06d}", remaining
+
+
+def perform_type_otp(
+    profile: str,
+    tab_id: int,
+    code: Optional[str] = None,
+    totp_secret: Optional[str] = None,
+    selector: Optional[str] = None,
+    submit_text: Optional[str] = None,
+    auto_verify: bool = True,
+    delay_ms: int = 60,
+    min_ttl: int = 4,
+) -> Dict[str, Any]:
+    """Types an OTP code char-by-char via CDP Input.dispatchKeyEvent with busy guard for multi-box React/AntD OTP inputs."""
+    rem: Optional[int] = None
+    if totp_secret:
+        code, rem = generate_totp_code(totp_secret)
+        if rem < min_ttl:
+            time.sleep(rem + 1)
+            code, rem = generate_totp_code(totp_secret)
+    if not code:
+        return {"ok": False, "error": "Provide an OTP code or --totp-secret"}
+    code = str(code).strip()
+
+    prep_js = f"""
+    (() => {{
+{SHARED_DOM_HELPERS_JS}
+      const userSel = {json.dumps(selector)};
+      const customSubmit = {json.dumps(submit_text)};
+      const roots = collectRoots(document);
+
+      const findVisibleContainer = () => {{
+        const modals = [];
+        for (const ctx of roots) {{
+          for (const m of ctx.root.querySelectorAll('.ant-modal, [role="dialog"], .modal, [aria-modal="true"]')) {{
+            const wrap = m.closest('.ant-modal-wrap');
+            const st = window.getComputedStyle(m);
+            const wst = wrap ? window.getComputedStyle(wrap) : null;
+            if (m.offsetWidth > 0 && st.display !== 'none' && (!wst || wst.display !== 'none')) {{
+              modals.push(m);
+            }}
+          }}
+        }}
+        if (modals.length) {{
+          const otpModal = modals.find(m => /confirm it is still you|authenticator|one-time|otp|verification code|two-factor|verify your identity/i.test(m.innerText || ''));
+          return otpModal || modals[modals.length - 1];
+        }}
+        return null;
+      }};
+
+      const scope = findVisibleContainer() || document;
+      let inputs = [];
+
+      if (userSel) {{
+        for (const ctx of roots) {{
+          const matched = Array.from(ctx.root.querySelectorAll(userSel)).filter(el => isElementVisible(el, ctx.offsetX, ctx.offsetY));
+          for (const m of matched) {{
+            if (m.tagName === 'INPUT') inputs.push(m);
+            else {{
+              const inner = Array.from(m.querySelectorAll('input')).filter(i => i.offsetWidth > 0);
+              inputs.push(...inner);
+            }}
+          }}
+          if (inputs.length) break;
+        }}
+      }} else {{
+        const otpGroup = Array.from(scope.querySelectorAll('.ant-otp input, input[autocomplete="one-time-code"], #authCode, #code, input[name*="otp" i], input[name*="totp" i], input[placeholder*="code" i]'))
+          .filter(i => i.offsetWidth > 0);
+        if (otpGroup.length) {{
+          inputs = otpGroup;
+        }} else {{
+          const candidates = Array.from(scope.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])'))
+            .filter(i => i.offsetWidth > 0);
+          const singleChars = candidates.filter(i => i.maxLength === 1 || (i.className || '').includes('otp'));
+          inputs = singleChars.length >= 4 ? singleChars : candidates;
+        }}
+      }}
+
+      if (!inputs.length) {{
+        return {{ ok: false, error: 'No visible OTP input fields found' }};
+      }}
+
+      const verifyLabels = customSubmit
+        ? [customSubmit.toLowerCase()]
+        : ['verify and submit', 'verify', 'confirm', 'submit', 'continue'];
+      const buttons = Array.from(scope.querySelectorAll('button')).filter(b => b.offsetWidth > 0);
+      const verifyBtn = buttons.find(b => verifyLabels.some(lbl => (b.innerText || '').trim().toLowerCase() === lbl))
+        || buttons.find(b => verifyLabels.some(lbl => (b.innerText || '').trim().toLowerCase().includes(lbl)));
+
+      const busy = inputs.some(i => i.disabled) || !!(verifyBtn && (verifyBtn.classList.contains('ant-btn-loading') || verifyBtn.getAttribute('aria-busy') === 'true'));
+      if (busy) {{
+        return {{ ok: true, busy: true, inputCount: inputs.length }};
+      }}
+
+      const proto = window.HTMLInputElement.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      for (const inp of inputs) {{
+        if (inp.value) {{
+          if (desc && desc.set) desc.set.call(inp, '');
+          else inp.value = '';
+          inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }}
+      }}
+      inputs[0].focus();
+      return {{ ok: true, busy: false, inputCount: inputs.length }};
+    }})()
+    """
+
+    prep = eval_tab_js(prep_js, profile=profile, tab_id=tab_id)
+    if not isinstance(prep, dict) or not prep.get("ok"):
+        return {"ok": False, "error": (prep.get("error") if isinstance(prep, dict) else None) or f"OTP preparation failed: {prep}"}
+    if prep.get("busy"):
+        return {"ok": True, "status": "busy_in_flight", "inputCount": prep.get("inputCount", 0), "totp_remaining_s": rem}
+
+    for ch in code:
+        cdp_send("Input.dispatchKeyEvent", {"type": "char", "text": ch}, profile=profile, tab_id=tab_id)
+        time.sleep(max(0.01, delay_ms / 1000.0))
+
+    time.sleep(0.3)
+    if not auto_verify:
+        return {"ok": True, "status": "typed", "code_length": len(code), "inputCount": prep.get("inputCount", 0), "totp_remaining_s": rem}
+
+    verify_js = f"""
+    (() => {{
+{SHARED_DOM_HELPERS_JS}
+      const customSubmit = {json.dumps(submit_text)};
+      const roots = collectRoots(document);
+      let scope = document;
+      for (const ctx of roots) {{
+        for (const m of ctx.root.querySelectorAll('.ant-modal, [role="dialog"], [aria-modal="true"]')) {{
+          const wrap = m.closest('.ant-modal-wrap');
+          const st = window.getComputedStyle(m);
+          const wst = wrap ? window.getComputedStyle(wrap) : null;
+          if (m.offsetWidth > 0 && st.display !== 'none' && (!wst || wst.display !== 'none')) {{
+            scope = m;
+          }}
+        }}
+      }}
+      const verifyLabels = customSubmit
+        ? [customSubmit.toLowerCase()]
+        : ['verify and submit', 'verify', 'confirm', 'submit', 'continue'];
+      const buttons = Array.from(scope.querySelectorAll('button')).filter(b => b.offsetWidth > 0);
+      const btn = buttons.find(b => verifyLabels.some(lbl => (b.innerText || '').trim().toLowerCase() === lbl))
+        || buttons.find(b => verifyLabels.some(lbl => (b.innerText || '').trim().toLowerCase().includes(lbl)));
+      if (!btn) return {{ closed: scope === document, found: false, busy: false }};
+      const busy = btn.classList.contains('ant-btn-loading') || btn.getAttribute('aria-busy') === 'true';
+      const r = btn.getBoundingClientRect();
+      const inVp = r.width > 0 && r.height > 0 && r.left + r.width / 2 >= 0 && r.left + r.width / 2 <= window.innerWidth && r.top + r.height / 2 >= 0 && r.top + r.height / 2 <= window.innerHeight;
+      if (!busy && !btn.disabled && !inVp) btn.click();
+      return {{
+        found: true,
+        busy,
+        disabled: !!btn.disabled,
+        inViewport: inVp,
+        x: Math.round(r.left + r.width / 2),
+        y: Math.round(r.top + r.height / 2),
+        label: (btn.innerText || '').trim()
+      }};
+    }})()
+    """
+    ver = eval_tab_js(verify_js, profile=profile, tab_id=tab_id)
+    clicked_verify = False
+    if isinstance(ver, dict) and ver.get("found") and not ver.get("busy") and not ver.get("disabled"):
+        if ver.get("inViewport"):
+            dispatch_cdp_click(profile, tab_id, int(ver["x"]), int(ver["y"]))
+        clicked_verify = True
+
+    return {
+        "ok": True,
+        "status": "auto_submitted" if (isinstance(ver, dict) and ver.get("busy")) else ("submitted" if clicked_verify else "typed"),
+        "code_length": len(code),
+        "inputCount": prep.get("inputCount", 0),
+        "clicked_verify": clicked_verify,
+        "verify": ver,
+        "totp_remaining_s": rem,
+    }
+
+
+def optimize_pdf_file(
+    input_pdf: str,
+    output_pdf: Optional[str] = None,
+    max_height: int = 960,
+    quality: int = 28,
+    black_point: int = 65,
+    white_point: int = 195,
+) -> Dict[str, Any]:
+    """Compresses embedded PDF scan images in-place while preserving embedded OCR text layers."""
+    try:
+        import pymupdf  # type: ignore
+    except ImportError:
+        try:
+            import fitz as pymupdf  # type: ignore
+        except ImportError:
+            return {"ok": False, "error": "PyMuPDF (pymupdf) is not installed"}
+
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return {"ok": False, "error": "Pillow (PIL) is not installed"}
+
+    src = Path(input_pdf).resolve()
+    if not src.exists():
+        return {"ok": False, "error": f"Input PDF not found: {src}"}
+    dst = Path(output_pdf).resolve() if output_pdf else src.with_name(f"{src.stem}_compact{src.suffix}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    span = max(1, white_point - black_point)
+    scale = 255.0 / span
+    lut = [max(0, min(255, int(round((px - black_point) * scale)))) for px in range(256)]
+
+    doc = pymupdf.open(str(src))
+    seen_xrefs = set()
+    replaced = 0
+    for page in doc:
+        for img_info in page.get_images(full=True):
+            xref = int(img_info[0])
+            if xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+            base = doc.extract_image(xref)
+            if not base or not base.get("image"):
+                continue
+            im = Image.open(io.BytesIO(base["image"])).convert("L")
+            w, h = im.size
+            if max_height > 0 and h > max_height:
+                im = im.resize((max(1, int(w * max_height / h)), max_height), Image.Resampling.LANCZOS)
+            im_clean = im.point(lut)
+            buf = io.BytesIO()
+            im_clean.save(buf, format="JPEG", quality=quality, optimize=True)
+            page.replace_image(xref, stream=buf.getvalue())
+            replaced += 1
+
+    orig_bytes = src.stat().st_size
+    doc.save(str(dst), garbage=4, deflate=True)
+    doc.close()
+
+    chk = pymupdf.open(str(dst))
+    pages = len(chk)
+    text_chars = sum(len(p.get_text().strip()) for p in chk)
+    chk.close()
+    out_bytes = dst.stat().st_size
+    ratio = round(orig_bytes / out_bytes, 2) if out_bytes else 0.0
+
+    return {
+        "ok": True,
+        "input": str(src),
+        "output": str(dst),
+        "pages": pages,
+        "images_replaced": replaced,
+        "original_bytes": orig_bytes,
+        "output_bytes": out_bytes,
+        "compression_ratio": ratio,
+        "preserved_text_chars": text_chars,
+    }
 
 
 def check_auth_circuit_breaker(profile: str, tab_id: int) -> Dict[str, Any]:
@@ -1909,6 +2492,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
         files=args.files,
         selector=args.selector,
         intercept=args.intercept,
+        direct_cdp=getattr(args, "direct_cdp", False),
         trigger=args.trigger,
         accelerator=getattr(args, "accelerator", None),
     )
@@ -1916,6 +2500,68 @@ def cmd_upload(args: argparse.Namespace) -> int:
         print(json.dumps(res, indent=2))
         return 0
     print(f"[!] Upload failed: {res.get('error')}", file=sys.stderr)
+    return 1
+
+
+def cmd_xhr_spy(args: argparse.Namespace) -> int:
+    """Installs, reads, or clears live XHR/fetch upload & API telemetry (plus optional session refresh)."""
+    profile = resolve_profile_connection(args.profile)
+    if not profile:
+        return 1
+    tab_id = resolve_tab_id(profile, tab_arg=args.tab)
+    res = perform_xhr_spy(
+        profile,
+        tab_id,
+        install=getattr(args, "install", False),
+        status=getattr(args, "status", False),
+        clear=getattr(args, "clear", False),
+        url_filter=getattr(args, "filter", None),
+        refresh_url=getattr(args, "refresh_url", None),
+    )
+    if res.get("ok"):
+        print(json.dumps(res, indent=2))
+        return 0
+    print(f"[!] XHR spy failed: {res.get('error')}", file=sys.stderr)
+    return 1
+
+
+def cmd_type_otp(args: argparse.Namespace) -> int:
+    """Types an explicit OTP code or TOTP secret char-by-char via CDP Input.dispatchKeyEvent."""
+    profile = resolve_profile_connection(args.profile)
+    if not profile:
+        return 1
+    tab_id = resolve_tab_id(profile, tab_arg=args.tab)
+    res = perform_type_otp(
+        profile,
+        tab_id,
+        code=getattr(args, "code", None),
+        totp_secret=getattr(args, "totp_secret", None),
+        selector=getattr(args, "selector", None),
+        submit_text=getattr(args, "submit_text", None),
+        auto_verify=getattr(args, "auto_verify", True),
+        delay_ms=getattr(args, "delay_ms", 60),
+    )
+    if res.get("ok"):
+        print(json.dumps(res, indent=2))
+        return 0
+    print(f"[!] OTP input failed: {res.get('error')}", file=sys.stderr)
+    return 1
+
+
+def cmd_optimize_pdf(args: argparse.Namespace) -> int:
+    """Compresses embedded scanned PDF images in-place while preserving OCR text layers."""
+    res = optimize_pdf_file(
+        input_pdf=args.input_pdf,
+        output_pdf=getattr(args, "output", None),
+        max_height=getattr(args, "max_height", 960),
+        quality=getattr(args, "quality", 28),
+        black_point=getattr(args, "black_point", 65),
+        white_point=getattr(args, "white_point", 195),
+    )
+    if res.get("ok"):
+        print(json.dumps(res, indent=2))
+        return 0
+    print(f"[!] PDF optimization failed: {res.get('error')}", file=sys.stderr)
     return 1
 
 
@@ -2108,7 +2754,8 @@ def cmd_run_goal(args: argparse.Namespace) -> int:
     halt_on_error = not getattr(args, "continue_on_error", False)
 
     for idx, act in enumerate(actions, 1):
-        if check_auth and tab_id:
+        step_type = str(act.get("action", "")).lower().strip()
+        if check_auth and tab_id and step_type != "type-otp":
             auth = check_auth_circuit_breaker(profile, tab_id)
             if auth.get("triggered"):
                 msg = f"2FA/CAPTCHA circuit breaker triggered before step {idx}: {auth.get('reasons')}"
@@ -2118,7 +2765,6 @@ def cmd_run_goal(args: argparse.Namespace) -> int:
                     Path(args.output).write_text(json.dumps({"goal": args.goal, "halted": True, "steps": step_results}, indent=2), encoding="utf-8")
                 return 2
 
-        step_type = str(act.get("action", "")).lower().strip()
         optional = bool(act.get("optional", False))
         print(f"  Step {idx}/{len(actions)}: [{step_type.upper()}] ...", end=" ", flush=True)
         res: Dict[str, Any] = {"ok": True}
@@ -2222,7 +2868,30 @@ def cmd_run_goal(args: argparse.Namespace) -> int:
                 files=list(act.get("files", [])),
                 selector=act.get("selector"),
                 intercept=bool(act.get("intercept", False)),
+                direct_cdp=bool(act.get("direct_cdp", False)),
                 trigger=act.get("trigger"),
+                accelerator=act.get("accelerator"),
+            )
+        elif step_type == "xhr-spy":
+            res = perform_xhr_spy(
+                profile,
+                tab_id,
+                install=bool(act.get("install", False)),
+                status=bool(act.get("status", False)),
+                clear=bool(act.get("clear", False)),
+                url_filter=act.get("filter"),
+                refresh_url=act.get("refresh_url"),
+            )
+        elif step_type == "type-otp":
+            res = perform_type_otp(
+                profile,
+                tab_id,
+                code=act.get("code"),
+                totp_secret=act.get("totp_secret"),
+                selector=act.get("selector"),
+                submit_text=act.get("submit_text"),
+                auto_verify=bool(act.get("auto_verify", True)),
+                delay_ms=int(act.get("delay_ms", 60)),
             )
         elif step_type == "dialog":
             res = execute_browser_command("HANDLE_DIALOG", {"tabId": tab_id, "accept": bool(act.get("accept", True)), "promptText": act.get("prompt_text")}, profile=profile)
@@ -2494,10 +3163,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_up.add_argument("files", nargs="+", help="Local file path(s) to upload")
     p_up.add_argument("--selector", help="CSS selector for <input type='file'>")
     p_up.add_argument("--intercept", action="store_true", help="Use file chooser interception + showOpenFilePicker stub")
+    p_up.add_argument("--direct-cdp", action="store_true", help="Force direct CDP DOM.setFileInputFiles (bypass userGesture dialog restrictions)")
     p_up.add_argument("--trigger", help="Button selector or text to click when using --intercept")
     p_up.add_argument("--accelerator", help="Keyboard shortcut to trigger file chooser when using --intercept (e.g. Alt+c)")
     _add_common_target_flags(p_up)
     p_up.set_defaults(func=cmd_upload)
+
+    # xhr-spy
+    p_xhr = subparsers.add_parser("xhr-spy", help="Install, poll, or clear live XHR/fetch upload & API progress telemetry")
+    p_xhr.add_argument("--install", action="store_true", help="Install idempotent XHR & fetch spy hook on tab")
+    p_xhr.add_argument("--status", action="store_true", help="Read captured XHR/fetch progress and status summary")
+    p_xhr.add_argument("--clear", action="store_true", help="Clear captured XHR/fetch spy buffer")
+    p_xhr.add_argument("--filter", help="Filter captured requests by URL substring")
+    p_xhr.add_argument("--refresh-url", help="Execute pre-upload session refresh POST before upload")
+    _add_common_target_flags(p_xhr)
+    p_xhr.set_defaults(func=cmd_xhr_spy)
+
+    # type-otp
+    p_otp = subparsers.add_parser("type-otp", help="Type OTP code char-by-char via CDP Input.dispatchKeyEvent (multi-box React/AntD safe)")
+    p_otp.add_argument("code", nargs="?", help="Explicit OTP code (optional if --totp-secret is provided)")
+    p_otp.add_argument("--totp-secret", help="Base32 RFC 6238 TOTP secret to generate live 6-digit code")
+    p_otp.add_argument("--selector", help="CSS selector for OTP input or container (auto-detects visible modal OTP boxes by default)")
+    p_otp.add_argument("--submit-text", help="Optional Verify button label to click if not auto-submitted")
+    p_otp.add_argument("--auto-verify", dest="auto_verify", action="store_true", default=True, help="Click Verify if not auto-submitted (default: true)")
+    p_otp.add_argument("--no-auto-verify", dest="auto_verify", action="store_false", help="Type OTP digits without clicking Verify")
+    p_otp.add_argument("--delay-ms", type=int, default=60, help="Inter-digit delay in milliseconds (default: 60)")
+    _add_common_target_flags(p_otp)
+    p_otp.set_defaults(func=cmd_type_otp)
+
+    # optimize-pdf
+    p_pdf = subparsers.add_parser("optimize-pdf", help="Compress scanned PDF images in-place while preserving OCR text layer")
+    p_pdf.add_argument("input_pdf", help="Source PDF path")
+    p_pdf.add_argument("-o", "--output", help="Destination PDF path (default: <stem>_compact.pdf)")
+    p_pdf.add_argument("--max-height", type=int, default=960, help="Maximum image pixel height (default: 960)")
+    p_pdf.add_argument("--quality", type=int, default=28, help="JPEG quality 1-95 (default: 28)")
+    p_pdf.add_argument("--black-point", type=int, default=65, help="Levels black point 0-254 (default: 65)")
+    p_pdf.add_argument("--white-point", type=int, default=195, help="Levels white point 1-255 (default: 195)")
+    p_pdf.set_defaults(func=cmd_optimize_pdf)
 
     # dialog
     p_dlg = subparsers.add_parser("dialog", help="Handle active JS alert/confirm/prompt dialog")

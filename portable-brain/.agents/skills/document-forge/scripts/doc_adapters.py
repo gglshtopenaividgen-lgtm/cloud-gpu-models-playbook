@@ -1,7 +1,7 @@
 """
 Unified Document Engineering & OCR Adapters for Autonomous AI Agents
 File: doc_adapters.py
-Location: <BRAIN_ROOT>/temp_read/doc_adapters.py
+Location: ./temp_read/doc_adapters.py
 
 Modules Included:
 1. UnifiedDocIngest: Multi-tier fallback router (PyMuPDF4LLM -> RapidOCR / Docling)

@@ -20,7 +20,15 @@ from typing import Any
 CHROME_USER_DATA = Path(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data"))
 LOCAL_STATE_PATH = CHROME_USER_DATA / "Local State"
 EXTENSION_DIR = Path(__file__).parent / "extension"
+SHORTCUTS_DIR = Path(__file__).parent / "shortcuts"
 QUOTA_STATE_PATH = Path(__file__).parent / "quota_state.json"
+
+DAILY_DRIVER_EMAILS = {
+    "agent3@example.com",
+    "agent2@example.com",
+    "agent4@example.com",
+    "agent@example.com",
+}
 
 CHROME_PATHS = [
     Path(os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe")),
@@ -43,6 +51,38 @@ class ChromeProfile:
     last_used: float = 0.0
     requests_completed: int = 0
     quota_hits: int = 0
+    has_bridge_extension: bool = False
+    is_daily_driver: bool = False
+
+
+def has_bridge_extension(dir_name: str) -> bool:
+    """Checks whether the unpacked Browser operator extension is registered in a Chrome profile."""
+    profile_dir = CHROME_USER_DATA / dir_name
+    for fname in ("Secure Preferences", "Preferences"):
+        pref_path = profile_dir / fname
+        if not pref_path.exists():
+            continue
+        try:
+            with open(pref_path, "r", encoding="utf-8", errors="ignore") as f:
+                data = json.load(f)
+            settings = data.get("extensions", {}).get("settings", {})
+            if not isinstance(settings, dict):
+                continue
+            for ext_id, ext_data in settings.items():
+                if not isinstance(ext_data, dict):
+                    continue
+                ext_path = str(ext_data.get("path", "")).lower()
+                ext_name = str(ext_data.get("manifest", {}).get("name", "")).lower()
+                if (
+                    str(ext_id).lower().startswith("bjfelpod")
+                    or "argon_bridge" in ext_path
+                    or "browser-operator" in ext_path
+                    or "browser operator" in ext_name
+                ):
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def get_chrome_executable() -> Path:
@@ -141,11 +181,13 @@ def get_all_profiles() -> list[ChromeProfile]:
             last_used=q.get("last_used", 0.0),
             requests_completed=q.get("requests_completed", 0),
             quota_hits=q.get("quota_hits", 0),
+            has_bridge_extension=has_bridge_extension(dir_name),
+            is_daily_driver=(email.lower() in DAILY_DRIVER_EMAILS),
         )
         profiles.append(p)
 
-    # Sort AI Premium first, then by least recently used
-    profiles.sort(key=lambda x: (not x.is_ai_premium, x.last_used))
+    # Sort Tier 1 bridged AI Premium Alts first, then Tier 2 Daily Drivers last resort
+    profiles.sort(key=lambda x: (not x.is_ai_premium, x.is_daily_driver, not x.has_bridge_extension, x.last_used))
     return profiles
 
 
@@ -155,7 +197,7 @@ def get_ai_premium_profiles() -> list[ChromeProfile]:
 
 
 def get_next_available_profile(preferred: str | None = None) -> ChromeProfile | None:
-    """Finds the next ready AI Premium profile using round-robin / least-recently-used."""
+    """Finds the next ready AI Premium profile (Tier 1 Alts first, Daily Drivers strictly last)."""
     profiles = get_ai_premium_profiles()
     now = time.time()
 
@@ -165,16 +207,15 @@ def get_next_available_profile(preferred: str | None = None) -> ChromeProfile | 
             if (p.dir_name == preferred or p.email == preferred) and (p.cooldown_until <= now):
                 return p
 
-    # Otherwise pick first available non-cooldown AI Pro profile
+    # Otherwise pick first available non-cooldown AI Pro profile (Tier 1 Alts before Daily Drivers)
     available = [p for p in profiles if p.cooldown_until <= now and p.status != "BUSY"]
     if available:
-        # Sort by least recently used
-        available.sort(key=lambda x: x.last_used)
+        available.sort(key=lambda x: (x.is_daily_driver, not x.has_bridge_extension, x.last_used))
         return available[0]
 
     # If all in cooldown, pick the one with earliest cooldown expiration
     if profiles:
-        profiles.sort(key=lambda x: x.cooldown_until)
+        profiles.sort(key=lambda x: (x.is_daily_driver, x.cooldown_until))
         return profiles[0]
     return None
 
@@ -220,20 +261,24 @@ def print_profiles_summary() -> None:
     profiles = get_all_profiles()
     now = time.time()
 
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 96)
     print(" CHROME GOOGLE ACCOUNTS & AI PRO PROFILES (from Local State)")
-    print("=" * 80)
-    print(f"{'DIR':<12} {'TIER':<8} {'STATUS':<10} {'NAME':<15} {'EMAIL':<30}")
-    print("-" * 80)
+    print("=" * 96)
+    print(f"{'DIR':<12} {'TIER':<11} {'EXT':<8} {'STATUS':<12} {'NAME':<15} {'EMAIL':<32}")
+    print("-" * 96)
 
     for p in profiles:
-        tier_str = "PRO ⭐️" if p.is_ai_premium else "FREE"
+        if p.is_ai_premium:
+            tier_str = "DAILY-PRO" if p.is_daily_driver else "ALT-PRO"
+        else:
+            tier_str = "FREE"
+        ext_str = "OK" if p.has_bridge_extension else "MISSING"
         status_str = p.status
         if p.cooldown_until > now:
             remaining = int(p.cooldown_until - now)
             status_str = f"COOL({remaining}s)"
-        print(f"{p.dir_name:<12} {tier_str:<8} {status_str:<10} {p.name[:14]:<15} {p.email:<30}")
-    print("=" * 80 + "\n")
+        print(f"{p.dir_name:<12} {tier_str:<11} {ext_str:<8} {status_str:<12} {p.name[:14]:<15} {p.email:<32}")
+    print("=" * 96 + "\n")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,22 @@
+{
+  "Profile 14": {
+    "current_usage_percent": 4,
+    "weekly_usage_percent": 0,
+    "current_reset": "6:09 AM",
+    "weekly_reset": "Nov 23 at 2:09 AM",
+    "last_checked": 1794779039.2714617,
+    "cooldown_until": 1795469063.5647483,
+    "status": "COOLDOWN",
+    "quota_hits": 1
+  },
+  "Profile 13": {
+    "cooldown_until": 1795378036.0049047,
+    "status": "COOLDOWN",
+    "quota_hits": 1,
+    "current_usage_percent": 1,
+    "weekly_usage_percent": 0,
+    "current_reset": "5:49 AM",
+    "weekly_reset": "Nov 28 at 2:49 AM",
+    "last_checked": 1795382332.1875196
+  }
+}

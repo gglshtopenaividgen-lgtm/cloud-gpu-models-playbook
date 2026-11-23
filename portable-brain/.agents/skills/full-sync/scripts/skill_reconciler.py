@@ -6,12 +6,12 @@ Part of the full-sync universal skill.
 Implements robust bi-directional synchronization between:
   1. `<project>/.agents/skills/<skill_name>/` (Project-local active skills)
   2. `brain/project_skills/<project>/<skill_name>/` (Central Brain project skill archives)
-  3. `brain/.agents/skills/<skill_name>/` (12 Universal Powerhouses)
+  3. `brain/.agents/skills/<skill_name>/` (13 Universal Powerhouses)
 
 Features:
 - Merkle Tree SHA-256 Hashing with CRLF/LF normalization to prevent false diffs.
 - Bi-directional sync: Project -> Brain backup & Brain -> Project hydration.
-- Universal Promotion Gate with strict 12-Core-Skill invariant protection.
+- Universal Promotion Gate with strict 13-Core-Skill invariant protection.
 - State tracking via `brain/project_skills/.skill_sync_state.json`.
 - Automatic catalog synchronization via `sync_catalog.py`.
 """
@@ -30,12 +30,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-BRAIN_ROOT = Path(r"<BRAIN_ROOT>")
+BRAIN_ROOT = Path(r"./")
 BRAIN_UNIVERSAL_SKILLS_DIR = BRAIN_ROOT / ".agents" / "skills"
 BRAIN_PROJECT_SKILLS_DIR = BRAIN_ROOT / "project_skills"
 SYNC_STATE_FILE = BRAIN_PROJECT_SKILLS_DIR / ".skill_sync_state.json"
 
-ALLOWED_12_UNIVERSAL_SKILLS: Set[str] = {
+ALLOWED_UNIVERSAL_SKILLS: Set[str] = {
     "auto-skill",
     "browser-operator",
     "deep-thinking",
@@ -45,10 +45,12 @@ ALLOWED_12_UNIVERSAL_SKILLS: Set[str] = {
     "full-sync",
     "hermes-agent-core",
     "internal-tools",
+    "offload",
     "rea",
     "ui-design-engine",
     "web-search-orchestrator",
 }
+ALLOWED_12_UNIVERSAL_SKILLS = ALLOWED_UNIVERSAL_SKILLS
 
 IGNORED_DIRS: Set[str] = {"__pycache__", ".git", "node_modules", ".venv", ".pytest_cache", ".system_generated"}
 IGNORED_SUFFIXES: Set[str] = {".pyc", ".pyo", ".tmp", ".bak", ".swp"}
@@ -159,7 +161,7 @@ class SkillTreeHasher:
                             k, v = line.split(":", 1)
                             k, v = k.strip().lower(), v.strip().strip('"\'')
                             meta.raw_frontmatter[k] = v
-                            if k == "name":
+                            if k == "name" and line == line.lstrip():
                                 meta.name = v
                             elif k == "description":
                                 meta.description = v
@@ -180,12 +182,13 @@ class SkillReconciler:
         self.allow_new_universal = allow_new_universal
         self.brain_project_skills_dir = self.brain_root / "project_skills"
         self.brain_universal_skills_dir = self.brain_root / ".agents" / "skills"
+        self.sync_state_file = self.brain_project_skills_dir / ".skill_sync_state.json"
         self.sync_state = self._load_sync_state()
 
     def _load_sync_state(self) -> Dict[str, Dict[str, str]]:
-        if SYNC_STATE_FILE.exists():
+        if self.sync_state_file.exists():
             try:
-                return json.loads(SYNC_STATE_FILE.read_text(encoding="utf-8"))
+                return json.loads(self.sync_state_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
         return {}
@@ -193,7 +196,7 @@ class SkillReconciler:
     def _save_sync_state(self):
         if not self.dry_run:
             self.brain_project_skills_dir.mkdir(parents=True, exist_ok=True)
-            SYNC_STATE_FILE.write_text(json.dumps(self.sync_state, indent=2), encoding="utf-8")
+            self.sync_state_file.write_text(json.dumps(self.sync_state, indent=2), encoding="utf-8")
 
     def discover_projects(self) -> Dict[str, Path]:
         """Discovers all active project roots from project_map.md and standard filesystem directories."""
@@ -214,21 +217,21 @@ class SkillReconciler:
 
         # 2. Add standard known locations
         candidates = [
-            Path(r"<USER_HOME>\Desktop\project-web"),
-            Path(r"<WORKSPACE_ROOT>"),
-            Path(r"<WORKSPACE_ROOT>"),
-            Path(r"<USER_HOME>\Desktop\appwrite\project-audio"),
-            Path(r"<WORKSPACE_ROOT>"),
-            Path(r"<WORKSPACE_ROOT>"),
-            Path(r"<WORKSPACE_ROOT>"),
-            Path(r"<PORTABLE_BRAIN_DIR>\sample-project"),
+            Path(r"C:\Users\User\Desktop\flh-one"),
+            Path(r"C:\Users\User\Desktop\PJCT\hi"),
+            Path(r"C:\Users\User\Desktop\PJCT\AWAKEN1"),
+            Path(r"C:\Users\User\Desktop\appwrite\flh-music"),
+            Path(r"C:\Users\User\Desktop\PJCT\custom_tools"),
+            Path(r"C:\Users\User\Desktop\PJCT\mineserver"),
+            Path(r"C:\Users\User\Desktop\PJCT\cult_game"),
+            Path(r"<PROJECTS_ROOT>\PKREA"),
         ]
         for c in candidates:
             if c.exists() and c.is_dir():
                 projects[c.name] = c
 
         # Scan PJCT subdirectories
-        pjct_dir = Path(r"<PROJECTS_ROOT>")
+        pjct_dir = Path(r"C:\Users\User\Desktop\PJCT")
         if pjct_dir.exists() and pjct_dir.is_dir():
             for sub in pjct_dir.iterdir():
                 if sub.is_dir() and not sub.name.startswith("."):
@@ -300,9 +303,15 @@ class SkillReconciler:
             self.sync_state[project_slug] = {}
 
         for skill_name in all_skills:
-            # Skip localized hermes-agent skill if identical to boilerplate
             p_skill_dir = project_skills_dir / skill_name
             b_skill_dir = brain_proj_dir / skill_name
+            names = {
+                skill_name.casefold(),
+                SkillTreeHasher.parse_frontmatter(p_skill_dir / "SKILL.md").name.casefold(),
+                SkillTreeHasher.parse_frontmatter(b_skill_dir / "SKILL.md").name.casefold(),
+            }
+            if names & ALLOWED_UNIVERSAL_SKILLS:
+                continue
 
             p_manifest = SkillTreeHasher.compute_manifest(project_slug, p_skill_dir)
             b_manifest = SkillTreeHasher.compute_manifest(project_slug, b_skill_dir)
@@ -339,10 +348,6 @@ class SkillReconciler:
 
             # 3. Skill exists ONLY in Brain -> Hydrate down to project
             if not p_skill_dir.exists() and b_skill_dir.exists():
-                # Don't hydrate universal skills down to projects as loose duplicates unless needed
-                if skill_name in ALLOWED_12_UNIVERSAL_SKILLS:
-                    continue
-
                 copied, deleted = self.sync_directory_delta(b_skill_dir, p_skill_dir, b_manifest, p_manifest)
                 self.sync_state[project_slug][skill_name] = b_manifest.tree_sha256
                 results.append(SyncResult(
@@ -415,24 +420,11 @@ class SkillReconciler:
         """Evaluates whether a skill created in a project should be promoted to Universal Skills."""
         skill_name = manifest.skill_name
 
-        # 1. If it's one of the 12 core universal skills
-        if skill_name in ALLOWED_12_UNIVERSAL_SKILLS:
-            target_universal_dir = self.brain_universal_skills_dir / skill_name
-            u_manifest = SkillTreeHasher.compute_manifest("brain_universal", target_universal_dir)
-            if manifest.tree_sha256 != u_manifest.tree_sha256 and manifest.max_mtime > u_manifest.max_mtime:
-                copied, deleted = self.sync_directory_delta(manifest.root_path, target_universal_dir, manifest, u_manifest)
-                results.append(SyncResult(
-                    project_slug=manifest.project_slug,
-                    skill_name=skill_name,
-                    action=SyncAction.PROMOTE_UNIVERSAL_UPDATE,
-                    files_copied=copied,
-                    files_removed=deleted,
-                    notes=f"Promoted project enhancements from {manifest.project_slug} to brain/.agents/skills/{skill_name}"
-                ))
+        if {skill_name.casefold(), manifest.metadata.name.casefold()} & ALLOWED_UNIVERSAL_SKILLS:
             return
 
-        # 2. If it declares target_universal_skill
-        if manifest.metadata.target_universal_skill in ALLOWED_12_UNIVERSAL_SKILLS:
+        # If it declares target_universal_skill
+        if manifest.metadata.target_universal_skill in ALLOWED_UNIVERSAL_SKILLS:
             target = manifest.metadata.target_universal_skill
             target_dir = self.brain_universal_skills_dir / target
             # Sync scripts/ or references/ as sub-modules
@@ -440,12 +432,12 @@ class SkillReconciler:
                 src_sub = manifest.root_path / sub
                 if src_sub.exists() and src_sub.is_dir():
                     dst_sub = target_dir / sub
-                    dst_sub.mkdir(parents=True, exist_ok=True)
                     for item in src_sub.iterdir():
                         if item.is_file():
                             d_item = dst_sub / item.name
                             if not d_item.exists() or SkillTreeHasher.hash_file(item) != SkillTreeHasher.hash_file(d_item):
                                 if not self.dry_run:
+                                    dst_sub.mkdir(parents=True, exist_ok=True)
                                     shutil.copy2(item, d_item)
                                 results.append(SyncResult(
                                     project_slug=manifest.project_slug,
@@ -456,7 +448,7 @@ class SkillReconciler:
                                 ))
             return
 
-        # 3. If marked universal but is a net-new skill
+        # If marked universal but is a net-new skill
         if manifest.metadata.scope == SkillScope.UNIVERSAL:
             candidate_dir = self.brain_project_skills_dir / "_universal_candidates" / skill_name
             if self.allow_new_universal:
@@ -472,7 +464,7 @@ class SkillReconciler:
                     notes=f"Promoted net-new universal powerhouse {skill_name} into brain/.agents/skills/"
                 ))
             else:
-                # Stage in candidates to preserve 12-powerhouse cap
+                # Stage in candidates to preserve the universal skill cap.
                 if not candidate_dir.exists() and not self.dry_run:
                     candidate_dir.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copytree(manifest.root_path, candidate_dir, dirs_exist_ok=True)
@@ -480,7 +472,7 @@ class SkillReconciler:
                     project_slug=manifest.project_slug,
                     skill_name=skill_name,
                     action=SyncAction.STAGE_UNIVERSAL_CANDIDATE,
-                    notes=f"Staged in brain/project_skills/_universal_candidates/{skill_name} (12-core invariant protected)"
+                    notes=f"Staged in brain/project_skills/_universal_candidates/{skill_name} (13-core invariant protected)"
                 ))
 
     def run_all(self, target_project: Optional[Path] = None) -> List[SyncResult]:
@@ -498,15 +490,25 @@ class SkillReconciler:
 
         # Trigger auto-skill catalog sync if any changes were made
         mutations = [r for r in all_results if r.action != SyncAction.NO_OP]
-        if mutations:
+        if mutations and self.dry_run:
+            print(f"[SkillReconciler] [Dry Run] Would apply {len(mutations)} change(s) and regenerate the Auto-Skill Catalog.")
+        elif mutations:
             print(f"[SkillReconciler] {len(mutations)} skill modification(s) executed. Regenerating Auto-Skill Catalog...")
             self.trigger_catalog_sync()
         else:
             print("[SkillReconciler] All project and universal skills are 100% synchronized. Zero disk mutations required.")
 
+        stale_refs = check_stale_skill_refs(self.brain_root, list(projects.values()))
+        if stale_refs:
+            print(f"[SkillReconciler] ⚠️ Detected {len(stale_refs)} [STALE_REF] path(s):")
+            for item in stale_refs[:20]:
+                print(f"  {item['tag']} {item['missing_ref']} in {item['source']}")
+
         return all_results
 
     def trigger_catalog_sync(self) -> bool:
+        if self.dry_run:
+            return True
         sync_script = self.brain_universal_skills_dir / "auto-skill" / "scripts" / "sync_catalog.py"
         if not sync_script.exists():
             return False
@@ -519,11 +521,73 @@ class SkillReconciler:
             return False
 
 
+AUTO_SYNC_BEGIN = "<!-- BEGIN AUTO-SYNC -->"
+AUTO_SYNC_END = "<!-- END AUTO-SYNC -->"
+REL_REF_RE = re.compile(r"`((?:scripts|references|argon_bridge|templates|examples)/[A-Za-z0-9_.\-/]+\.(?:py|md|json|bat|ps1|sh|yaml|yml|ts|js))`")
+
+
+def sync_project_skill_overlay(project_root: Path, skill_name: str, generated_block: str, dry_run: bool = False) -> Tuple[Path, bool]:
+    """Updates ONLY the fenced <!-- BEGIN AUTO-SYNC --> block inside <project>/.agents/skill_overlays/<skill>.md."""
+    overlay_dir = Path(project_root) / ".agents" / "skill_overlays"
+    overlay_path = overlay_dir / f"{skill_name}.md"
+    fenced = f"{AUTO_SYNC_BEGIN}\n{generated_block.strip()}\n{AUTO_SYNC_END}"
+
+    if overlay_path.is_file():
+        existing = overlay_path.read_text(encoding="utf-8", errors="replace")
+        if AUTO_SYNC_BEGIN in existing and AUTO_SYNC_END in existing:
+            before, rest = existing.split(AUTO_SYNC_BEGIN, 1)
+            _, after = rest.split(AUTO_SYNC_END, 1)
+            updated = f"{before}{fenced}{after}"
+        else:
+            updated = existing.rstrip() + "\n\n" + fenced + "\n"
+        changed = (updated.replace("\r\n", "\n") != existing.replace("\r\n", "\n"))
+    else:
+        updated = (
+            f"# Project Skill Overlay :: {skill_name} ({Path(project_root).name})\n\n"
+            f"Add project-specific notes outside the AUTO-SYNC fence below.\n\n"
+            f"{fenced}\n"
+        )
+        changed = True
+
+    if changed and not dry_run:
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+        overlay_path.write_text(updated, encoding="utf-8")
+    return overlay_path, changed
+
+
+def check_stale_skill_refs(brain_root: Path = BRAIN_ROOT, project_roots: Optional[List[Path]] = None) -> List[Dict[str, str]]:
+    """Checks all universal SKILL.md files and project overlays for dead relative script/reference paths."""
+    stale: List[Dict[str, str]] = []
+    skills_dir = Path(brain_root) / ".agents" / "skills"
+    if skills_dir.is_dir():
+        for skill_dir in sorted(skills_dir.iterdir()):
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            txt = skill_md.read_text(encoding="utf-8", errors="replace")
+            for m in REL_REF_RE.finditer(txt):
+                rel = m.group(1)
+                if not (skill_dir / rel).exists():
+                    stale.append({"source": str(skill_md), "missing_ref": rel, "tag": "[STALE_REF]"})
+
+    for proj in (project_roots or []):
+        ov_dir = Path(proj) / ".agents" / "skill_overlays"
+        if not ov_dir.is_dir():
+            continue
+        for ov_file in sorted(ov_dir.glob("*.md")):
+            txt = ov_file.read_text(encoding="utf-8", errors="replace")
+            for m in REL_REF_RE.finditer(txt):
+                rel = m.group(1)
+                if not (Path(proj) / rel).exists() and not (skills_dir / ov_file.stem / rel).exists():
+                    stale.append({"source": str(ov_file), "missing_ref": rel, "tag": "[STALE_REF]"})
+    return stale
+
+
 def main():
     parser = argparse.ArgumentParser(description="Universal Skill Synchronizer & Reconciler")
     parser.add_argument("--project", type=Path, default=None, help="Target specific project path")
     parser.add_argument("--dry-run", action="store_true", help="Audit diffs without writing to disk")
-    parser.add_argument("--allow-new-universal", action="store_true", help="Allow promoting beyond 12 universal powerhouses")
+    parser.add_argument("--allow-new-universal", action="store_true", help="Allow promoting beyond 13 universal powerhouses")
 
     args = parser.parse_args()
     reconciler = SkillReconciler(dry_run=args.dry_run, allow_new_universal=args.allow_new_universal)

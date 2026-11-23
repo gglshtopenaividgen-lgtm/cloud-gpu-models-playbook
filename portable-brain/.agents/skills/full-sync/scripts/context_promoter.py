@@ -17,12 +17,13 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-BRAIN_ROOT = Path(r"<BRAIN_ROOT>")
+BRAIN_ROOT = Path(r"./")
 STATE_FILE = BRAIN_ROOT / "projects" / ".context_promotion_state.json"
 
 # Keywords that indicate cross-project / universal architectural relevance
@@ -234,41 +235,39 @@ class UniversalClassifier:
 
     @classmethod
     def is_universal(cls, block: MarkdownBlock) -> bool:
-        score = cls.score_block(block)
-        return score >= 1.5
+        scope = re.search(
+            r"(?im)^\s*(?:-\s+)?\*{0,2}scope\*{0,2}\s*:\s*\*{0,2}(universal|cross-project|project-local|local)\*{0,2}\s*$",
+            block.raw_body,
+        )
+        if scope:
+            return scope.group(1).casefold() in {"universal", "cross-project"}
+        return bool(re.match(r"(?i)^\[(?:universal|cross-project)\]\s+", block.title))
 
 
 class ContextPromoter:
     def __init__(self, brain_root: Path = BRAIN_ROOT, dry_run: bool = False):
         self.brain_root = brain_root.resolve()
         self.dry_run = dry_run
+        self.state_file = self.brain_root / "projects" / STATE_FILE.name
         self.known_signatures: Set[str] = self._load_signatures()
 
     def _load_signatures(self) -> Set[str]:
         sigs: Set[str] = set()
-        if STATE_FILE.exists():
+        if self.state_file.exists():
             try:
-                loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                loaded = json.loads(self.state_file.read_text(encoding="utf-8"))
                 if isinstance(loaded, list):
                     sigs.update(loaded)
-            except Exception:
+            except (OSError, ValueError):
                 pass
-
-        # Also pre-seed from existing brain files
-        for fname in ["ideas.md", "mistakes.md", "constraints.md", "resources.md"]:
-            b_file = self.brain_root / fname
-            if b_file.exists():
-                content = b_file.read_text(encoding="utf-8", errors="replace")
-                blocks = MarkdownASTParser.parse_blocks("brain", fname, content)
-                for b in blocks:
-                    sigs.add(b.sig_hash)
-                    sigs.add(b.title_hash)
         return sigs
 
     def _save_signatures(self):
         if not self.dry_run:
-            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps(sorted(list(self.known_signatures)), indent=2), encoding="utf-8")
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.state_file.with_suffix(".tmp")
+            temp_path.write_text(json.dumps(sorted(self.known_signatures), indent=2), encoding="utf-8")
+            os.replace(temp_path, self.state_file)
 
     def archive_to_project_brain(self, project_slug: str, filename: str, content: str):
         if self.dry_run:
@@ -279,17 +278,17 @@ class ContextPromoter:
         dst_file.write_text(content, encoding="utf-8")
 
     def promote_block_to_brain(self, block: MarkdownBlock, category: ContextCategory) -> bool:
+        if not UniversalClassifier.is_universal(block):
+            return False
+
         brain_target = self.brain_root / category.value
         if not brain_target.exists():
             return False
 
+        signature = f"v2:{block.project_slug.casefold()}:{category.value}:{block.sig_hash}"
+        marker = f"<!-- context-promotion {signature} -->"
         old_content = brain_target.read_text(encoding="utf-8", errors="replace")
-
-        # Double check if title is already in target file
-        clean_title = re.sub(r"[^a-zA-Z0-9\s]", "", block.title).strip().lower()
-        if clean_title and clean_title in old_content.lower():
-            self.known_signatures.add(block.sig_hash)
-            self.known_signatures.add(block.title_hash)
+        if signature in self.known_signatures or marker in old_content:
             return False
 
         today = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -319,7 +318,7 @@ class ContextPromoter:
         else:
             formatted = f"\n## [{block.project_slug.upper()} Synced: {today}]\n{block.title}\n{block.raw_body}\n"
 
-        new_content = old_content + formatted
+        new_content = old_content + formatted + f"{marker}\n"
 
         # Monotonic Anti-Wipe Guard
         if len(new_content.encode("utf-8")) < len(old_content.encode("utf-8")):
@@ -338,15 +337,9 @@ class ContextPromoter:
                 except PermissionError:
                     time.sleep(0.3)
             if not replaced:
-                brain_target.write_text(new_content, encoding="utf-8")
-                if tmp_target.exists():
-                    try:
-                        tmp_target.unlink()
-                    except Exception:
-                        pass
+                raise OSError(f"Could not atomically replace {brain_target}")
 
-        self.known_signatures.add(block.sig_hash)
-        self.known_signatures.add(block.title_hash)
+        self.known_signatures.add(signature)
         return True
 
     def process_project(self, project_slug: str, project_path: Path) -> Dict[str, int]:
@@ -375,20 +368,8 @@ class ContextPromoter:
 
             blocks = MarkdownASTParser.parse_blocks(project_slug, fname, content)
             for b in blocks:
-                if b.sig_hash in self.known_signatures or b.title_hash in self.known_signatures:
-                    continue
-
-                if UniversalClassifier.is_universal(b):
-                    success = self.promote_block_to_brain(b, category)
-                    if success:
-                        if category == ContextCategory.IDEAS:
-                            counts["promoted_ideas"] += 1
-                        elif category == ContextCategory.MISTAKES:
-                            counts["promoted_mistakes"] += 1
-                        elif category == ContextCategory.CONSTRAINTS:
-                            counts["promoted_constraints"] += 1
-                        elif category == ContextCategory.RESOURCES:
-                            counts["promoted_resources"] += 1
+                if self.promote_block_to_brain(b, category):
+                    counts[f"promoted_{category.value.removesuffix('.md')}"] += 1
 
         return counts
 

@@ -1,4 +1,4 @@
-# Cloud AI Provider Model Health & Latency Registry
+# FLH-ONE AI Provider Model Health & Latency Registry
 
 > **LOCATION**: `context/model_benchmarks.md` & `benchmarks/`  
 > **UPDATED**: August 2026 (Universe Benchmark: 59/84 Online, Avg Latency: 1418ms)

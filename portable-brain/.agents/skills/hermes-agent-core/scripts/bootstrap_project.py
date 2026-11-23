@@ -14,7 +14,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-BRAIN_ROOT = Path("<BRAIN_ROOT>")
+BRAIN_ROOT = Path("./")
 HERMES_CORE_DIR = BRAIN_ROOT / ".agents" / "skills" / "hermes-agent-core"
 HERMES_SCRIPTS_DIR = HERMES_CORE_DIR / "scripts"
 
@@ -77,7 +77,7 @@ CONSTRAINTS_TEMPLATE = """# {project_title} DYNAMIC ARCHITECTURAL CONSTRAINTS
 RESOURCES_TEMPLATE = """# {project_title} RESOURCES & CREDENTIALS LEDGER
 
 > **Active cloud resources, endpoints, credentials, VM IPs, and database connections for {project_name}.**
-> **For universal multi-project master credentials, refer to `<BRAIN_ROOT>\\resources.md`.**
+> **For universal multi-project master credentials, refer to `./\resources.md`.**
 
 ---
 
@@ -138,7 +138,7 @@ FILE_MAP_TEMPLATE = """# {project_title} FILE MAP & SUBSYSTEM INDEX
 
 AGENTS_TEMPLATE = """# {project_title} Multi-Agent Operating Rules & Boundaries
 
-> **Source Rules**: `.agents/rules/` & `<BRAIN_ROOT>\\.agents\\rules/`
+> **Source Rules**: `.agents/rules/` & `./\.agents\\rules/`
 
 ---
 
@@ -222,25 +222,25 @@ trigger: always_on
 1. **Persistent Memory First**:
    Before planning or designing major components, query Hermes memory to check for past solutions or user decisions:
    ```powershell
-   python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py search "<keywords>"
+   python ./\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py search "<keywords>"
    ```
 
 2. **Continuous Learning Loop**:
    When completing a major milestone or fixing a subtle bug, record the insight into local memory and Central Brain:
    ```powershell
-   python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py store --project "{project_name}" --category "architecture" --title "<summary>" --content "<details>"
+   python ./\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py store --project "{project_name}" --category "architecture" --title "<summary>" --content "<details>"
    ```
 
 3. **Automated Skill Synthesis**:
    When you establish a repeatable multi-step procedure, synthesize it into a reusable skill:
    ```powershell
-   python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\skill_synthesizer.py --name "<skill-name>" --description "<desc>" --instructions "<steps>"
+   python ./\.agents\\skills\\hermes-agent-core\\scripts\\skill_synthesizer.py --name "<skill-name>" --description "<desc>" --instructions "<steps>"
    ```
 
 4. **Context Compaction**:
    Keep project context lean and prevent token bloat:
    ```powershell
-   python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\context_compressor.py
+   python ./\.agents\\skills\\hermes-agent-core\\scripts\\context_compressor.py
    ```
 """
 
@@ -258,16 +258,16 @@ This skill provides direct access to the Hermes cognitive subsystem, linking thi
 ## CLI Commands Available
 
 1. **Search Memory**:
-   `python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py search "<query>"`
+   `python ./\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py search "<query>"`
 
 2. **Save Insight**:
-   `python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py store --project "{project_name}" --category "<cat>" --title "<title>" --content "<content>"`
+   `python ./\.agents\\skills\\hermes-agent-core\\scripts\\hermes_memory.py store --project "{project_name}" --category "<cat>" --title "<title>" --content "<content>"`
 
 3. **Synthesize Skill**:
-   `python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\skill_synthesizer.py --name "<name>" --description "<desc>" --instructions "<steps>"`
+   `python ./\.agents\\skills\\hermes-agent-core\\scripts\\skill_synthesizer.py --name "<name>" --description "<desc>" --instructions "<steps>"`
 
 4. **Compact Context**:
-   `python <BRAIN_ROOT>\\.agents\\skills\\hermes-agent-core\\scripts\\context_compressor.py`
+   `python ./\.agents\\skills\\hermes-agent-core\\scripts\\context_compressor.py`
 """
 
 
