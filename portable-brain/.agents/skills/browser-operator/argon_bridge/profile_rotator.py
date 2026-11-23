@@ -623,6 +623,13 @@ def open_profile(
     }
 
 
+def cleanup_idle(idle_seconds: float = 0.0) -> int:
+    """Closes blank tabs and unused Tier-1 Alt Chrome profiles via POST /cleanup/idle."""
+    res = _http_json("POST", "/cleanup/idle", {"idle_seconds": idle_seconds})
+    print(json.dumps(res, indent=2))
+    return 0 if res.get("ok") else 1
+
+
 def pick_next_auto_profile(exclude: set[str] | None = None) -> tuple[profile_manager.ChromeProfile | None, bool]:
     """Selects next closed bridged AI Pro profile: Tier 1 Alts first, Tier 2 Daily Drivers last."""
     excluded = exclude or set()
@@ -676,6 +683,9 @@ def main() -> int:
     p_close.add_argument("--force", action="store_true", help="Close even if non-agent tabs are open.")
     p_close.add_argument("--timeout", type=float, default=10.0, help="Seconds to verify closure.")
 
+    p_clean = sub.add_parser("cleanup", help="Close blank tabs and unused Tier-1 Alt Chrome profiles.")
+    p_clean.add_argument("--idle-seconds", type=float, default=0.0, help="Minimum idle time in seconds (default 0 for immediate cleanup).")
+
     p_rot = sub.add_parser("rotate", help="Optionally close one profile and open another (or --auto next Tier 1 Alt).")
     p_rot.add_argument("--close", dest="close_target", default=None, help="Profile to close first.")
     p_rot.add_argument("--open", dest="open_target", default=None, help="Specific profile to open.")
@@ -713,6 +723,9 @@ def main() -> int:
         rc, res = close_profile(args.profile, force=args.force, timeout=args.timeout)
         print(json.dumps(res, indent=2))
         return rc
+
+    if args.cmd == "cleanup":
+        return cleanup_idle(idle_seconds=args.idle_seconds)
 
     if args.cmd == "rotate":
         if not args.open_target and not args.auto:

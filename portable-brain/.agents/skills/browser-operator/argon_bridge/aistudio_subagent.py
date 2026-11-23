@@ -1046,30 +1046,25 @@ def park_tab_about_blank(profile_dir: str, tab_id: int) -> None:
 
 
 def reclaim_finished_tab(profile_dir: str, tab_id: int) -> None:
-    """Close an owned tab with a sibling in its window, or park a verified sole tab."""
+    """Close an owned tab cleanly via CLOSE_TAB; fall back to parking at about:blank only if CLOSE_TAB fails."""
     try:
-        listed = call_bridge_api(
-            "/command", method="POST",
-            payload={"action": "LIST_TABS", "profile": profile_dir}, timeout=5.0,
-        )
-        if not listed.get("ok") or not isinstance(listed.get("tabs"), list):
-            return
-        tabs = listed["tabs"]
-        target = next((tab for tab in tabs if tab.get("id") == tab_id), None)
-        if target is None or target.get("windowId") is None:
-            return
-        if not any(tab.get("windowId") == target["windowId"] and tab.get("id") != tab_id for tab in tabs):
-            park_tab_about_blank(profile_dir, tab_id)
-            return
         result = call_bridge_api(
-            "/command", method="POST",
+            "/command",
+            method="POST",
             payload={"action": "CLOSE_TAB", "profile": profile_dir, "agent_guarded": True, "params": {"tabId": tab_id}},
             timeout=5.0,
         )
         if result.get("ok"):
             print(f"[AIStudioSubagent] Closed finished agent tab {tab_id}.")
+            return
+        print(f"[AIStudioSubagent] CLOSE_TAB failed ({result.get('error')}); falling back to parking at about:blank.")
+        park_tab_about_blank(profile_dir, tab_id)
     except Exception as exc:
-        print(f"[AIStudioSubagent] Could not reclaim finished tab {tab_id}: {exc}", file=sys.stderr)
+        print(f"[AIStudioSubagent] Could not close finished tab {tab_id} ({exc}); attempting fallback park.", file=sys.stderr)
+        try:
+            park_tab_about_blank(profile_dir, tab_id)
+        except Exception:
+            pass
 
 
 def ensure_extension_ready(preferred_profile: str, target_url: str = "https://aistudio.google.com/prompts/new_chat") -> Dict[str, Any]:

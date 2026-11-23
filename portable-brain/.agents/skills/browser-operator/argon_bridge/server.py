@@ -34,6 +34,7 @@ ROTATOR_SCRIPT = Path(__file__).parent / "profile_rotator.py"
 # Global Agent Resource Cap & User-Tab Ownership Ledger
 MAX_AGENT_PROFILES = 3
 MAX_AGENT_TABS = 6
+DAILY_DRIVER_PROFILES = {"Profile 7", "Profile 8", "Profile 9", "Profile 16"}
 RESOURCES_FILE = Path(__file__).parent / "bridge_agent_resources.json"
 _RESOURCES_LOCK = threading.Lock()
 ADMISSION_LOCK = web.AppKey("resource_admission_lock", asyncio.Lock)
@@ -1023,6 +1024,131 @@ async def handle_profile_close(request: web.Request) -> web.Response:
     return web.json_response(res, status=status_code)
 
 
+async def reap_idle_tabs_and_profiles(idle_seconds: float = 120.0) -> Dict[str, Any]:
+    """Closes redundant blank tabs and idle Tier-1 Alt Chrome profiles.
+
+    Invariants:
+    1. Iterates ONLY over connected Tier-1 Alt profiles (not is_daily_driver, and not in DAILY_DRIVER_PROFILES / DAILY_DRIVER_EMAILS).
+    2. Strictly skips any profile that currently holds an active lease in active_locks.
+    3. Blank tabs: strictly about:blank or chrome://newtab/ (case-insensitive).
+    4. If the profile has real tabs (Flow, Gemini, YouTube, etc.), close ONLY the blank tabs. Real tabs stay 100% untouched.
+    5. If ALL tabs in the profile are strictly blank and idle_time >= idle_seconds, close all blank tabs so the unused alt window exits and frees RAM.
+    6. NEVER close any tab whose URL is not strictly about:blank / chrome://newtab/.
+    """
+    profiles = profile_manager.get_all_profiles()
+    active_locks = profile_lock_manager.clean_expired_locks()
+    leased_dirs = {entry.get("profile") or key.split("::")[0] for key, entry in active_locks.items()}
+
+    closed_blank_tabs: list[dict[str, Any]] = []
+    closed_idle_profiles: list[dict[str, Any]] = []
+    skipped_profiles: list[dict[str, Any]] = []
+
+    now = time.time()
+
+    for p in profiles:
+        # Check Daily Driver guard
+        is_daily = (
+            getattr(p, "is_daily_driver", False)
+            or p.dir_name in DAILY_DRIVER_PROFILES
+            or (p.email and p.email.lower() in profile_manager.DAILY_DRIVER_EMAILS)
+        )
+        if is_daily:
+            skipped_profiles.append({"profile": p.dir_name, "reason": "daily_driver"})
+            continue
+
+        # Check Active Lease guard
+        if p.dir_name in leased_dirs:
+            skipped_profiles.append({"profile": p.dir_name, "reason": "actively_leased"})
+            continue
+
+        # Check if connected
+        client_entry = None
+        for cid, c in CONNECTED_CLIENTS.items():
+            if c.get("dir_name") == p.dir_name or (p.email and c.get("email", "").lower() == p.email.lower()):
+                client_entry = c
+                break
+        if not client_entry:
+            continue
+
+        last_active = max(client_entry.get("last_ping", 0.0), getattr(p, "last_used", 0.0))
+        idle_time = now - last_active if last_active > 0 else 9999.0
+
+        # Query live tabs
+        tabs_res = await send_extension_command("LIST_TABS", {}, preferred_profile=p.dir_name, timeout=5.0)
+        if not tabs_res.get("ok") or not isinstance(tabs_res.get("tabs"), list):
+            continue
+
+        tabs = tabs_res["tabs"]
+        if not tabs:
+            continue
+
+        blank_tabs = []
+        real_tabs = []
+        for t in tabs:
+            u = str(t.get("url", "")).strip().lower()
+            if u in ("about:blank", "chrome://newtab/", "chrome://newtab"):
+                blank_tabs.append(t)
+            else:
+                real_tabs.append(t)
+
+        # Case A: Real tabs exist and blank tabs exist -> Close ONLY blank tabs
+        if len(real_tabs) > 0 and len(blank_tabs) > 0:
+            for bt in blank_tabs:
+                tid = bt.get("id")
+                if tid is not None:
+                    res = await send_extension_command("CLOSE_TAB", {"tabId": tid}, preferred_profile=p.dir_name, timeout=5.0)
+                    if res.get("ok"):
+                        release_agent_tab(p.dir_name, tid)
+                        closed_blank_tabs.append({"profile": p.dir_name, "tabId": tid, "reason": "redundant_blank_with_real_tabs"})
+
+        # Case B: ALL tabs are strictly blank
+        elif len(real_tabs) == 0 and len(blank_tabs) > 0:
+            if idle_time >= idle_seconds:
+                for bt in blank_tabs:
+                    tid = bt.get("id")
+                    if tid is not None:
+                        res = await send_extension_command("CLOSE_TAB", {"tabId": tid}, preferred_profile=p.dir_name, timeout=5.0)
+                        if res.get("ok"):
+                            release_agent_tab(p.dir_name, tid)
+                            closed_blank_tabs.append({"profile": p.dir_name, "tabId": tid, "reason": "idle_profile_exit"})
+                release_agent_launched_profile(p.dir_name, clear_tabs=True)
+                closed_idle_profiles.append({
+                    "profile": p.dir_name,
+                    "closed_tabs": len(blank_tabs),
+                    "idle_seconds": round(idle_time, 1)
+                })
+
+    return {
+        "ok": True,
+        "closed_blank_tabs": closed_blank_tabs,
+        "closed_idle_profiles": closed_idle_profiles,
+        "skipped_profiles": skipped_profiles,
+    }
+
+
+async def handle_cleanup_idle(request: web.Request) -> web.Response:
+    """POST /cleanup/idle - Reaps blank tabs and closes idle Tier-1 Alt profiles."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    idle_seconds = float(body.get("idle_seconds", 0.0))
+    res = await reap_idle_tabs_and_profiles(idle_seconds=idle_seconds)
+    return web.json_response(res)
+
+
+async def background_idle_reaper(app_instance: web.Application) -> None:
+    """Lightweight background task running every 60s reaping blank tabs and idle alt profiles (>= 120s idle)."""
+    while True:
+        try:
+            await asyncio.sleep(60.0)
+            await reap_idle_tabs_and_profiles(idle_seconds=120.0)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[Bridge] Warning in background idle reaper task: {e}", file=sys.stderr)
+
+
 async def handle_profile_rotate(request: web.Request) -> web.Response:
     """POST /profile/rotate - Closes current profile cleanly and opens target/--auto next on WinSta0\\Default."""
     desktop_name = _get_current_desktop_name()
@@ -1099,9 +1225,26 @@ def create_app() -> web.Application:
     app.router.add_post("/profile/rotate", handle_profile_rotate)
     app.router.add_post("/profile/shortcuts", handle_profile_shortcuts)
     app.router.add_post("/shutdown", handle_shutdown)
+    app.router.add_post("/cleanup/idle", handle_cleanup_idle)
     app.router.add_post("/lock/acquire", handle_acquire_lock)
     app.router.add_post("/lock/renew", handle_renew_lock)
     app.router.add_post("/lock/release", handle_release_lock)
+
+    # Lightweight 60s background idle reaper task
+    async def start_background_tasks(app_instance: web.Application) -> None:
+        app_instance["idle_reaper_task"] = asyncio.create_task(background_idle_reaper(app_instance))
+
+    async def cleanup_background_tasks(app_instance: web.Application) -> None:
+        task = app_instance.get("idle_reaper_task")
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    app.on_startup.append(start_background_tasks)
+    app.on_cleanup.append(cleanup_background_tasks)
 
     # Enable basic CORS for local browser access
     async def add_cors(request: web.Request, response: web.Response):

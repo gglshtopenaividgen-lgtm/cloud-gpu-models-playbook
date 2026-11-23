@@ -541,6 +541,10 @@ class GeminiBrainDriver:
 
         return res
 
+    def inject_helper(self, tab_id: int, profile: Optional[str] = None) -> Dict[str, Any]:
+        """Injects or re-verifies HELPER_JS inside the target tab context."""
+        return self.execute_js(tab_id, "return (typeof window.__geminiDriver !== 'undefined');", profile=profile)
+
     def get_usage_limit(self, profile: Optional[str] = None) -> Dict[str, Any]:
         """Checks live Gemini usage limits in a clean background tab (gemini.google.com/usage)."""
         prof = profile or self.default_profile or "Profile 14"
@@ -1854,6 +1858,8 @@ class GeminiBrainDriver:
         timeout_sec: int = 300,
         poll_interval_sec: float = 2.5,
         max_recovery_retries: int = 2,
+        clean: bool = False,
+        keep_tab: bool = True,
     ) -> Dict[str, Any]:
         """
         Executes a strict 5-Step Pre-Send Sequence:
@@ -2517,7 +2523,7 @@ class GeminiBrainDriver:
                         print(f"[GeminiDriver] Note on usage check: {e}", file=sys.stderr)
                         u_info = {"ok": False, "error": str(e)}
 
-                return {
+                out_res = {
                     "ok": True,
                     "session_id": session_id,
                     "profile": prof,
@@ -2531,6 +2537,10 @@ class GeminiBrainDriver:
                     "usage": u_info,
                     "duration_seconds": round(time.time() - start_time, 1),
                 }
+                if clean:
+                    print(f"[GeminiDriver] Auto-cleaning session '{session_id}' (keep_tab={keep_tab})...")
+                    self.delete_session(session_id, profile=prof, close_tab=not keep_tab)
+                return out_res
 
             elapsed_since_start = time.time() - start_time
             time_since_last_token = time.time() - last_change_time
@@ -2553,6 +2563,9 @@ class GeminiBrainDriver:
                 last_change_time = time.time()
                 continue
 
+        if clean:
+            print(f"[GeminiDriver] Auto-cleaning session '{session_id}' after timeout (keep_tab={keep_tab})...")
+            self.delete_session(session_id, profile=prof, close_tab=not keep_tab)
         return {"ok": False, "error": "Timeout waiting for response", "partial": last_text}
 
 
@@ -2655,8 +2668,12 @@ class GeminiBrainDriver:
         print(f"[GeminiDriver] 🧹 Purged {del_count} automated test chats from sidebar on {profile or 'active'}.")
         return del_count
 
-    def delete_session(self, session_id: str, profile: Optional[str] = None) -> Dict[str, Any]:
-        """Deletes chat from sidebar (Hover -> 3-dots -> Delete -> Confirm modal)."""
+    def delete_chat(self, chat_id: str, profile: Optional[str] = None, max_retries: int = 2, close_tab: bool = False) -> Dict[str, Any]:
+        """Deletes a chat by session_id or chat_id from sidebar. Alias for delete_session."""
+        return self.delete_session(session_id=chat_id, profile=profile, max_retries=max_retries, close_tab=close_tab)
+
+    def delete_session(self, session_id: str, profile: Optional[str] = None, max_retries: int = 2, close_tab: bool = False) -> Dict[str, Any]:
+        """Deletes chat from sidebar (Hover -> 3-dots -> Delete -> Confirm modal). Retries on failure."""
         meta = self.registry.get(session_id)
         if meta:
             tab_id = self.tab_id or meta.get("tab_id")
@@ -2755,14 +2772,40 @@ class GeminiBrainDriver:
         }}
         return {{ ok: true, deleted_chat_id: cId || 'latest' }};
         """
-        res = self.execute_js(tab_id, del_js, profile=prof)
+
+        res: Dict[str, Any] = {"ok": False, "error": "Not executed"}
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                print(f"[GeminiDriver] Deletion attempt {attempt}/{max_retries} failed or timed out. Navigating to https://gemini.google.com/app and re-injecting helper...")
+                try:
+                    self._call_api("/command", {"action": "CDP_COMMAND", "params": {"tabId": tab_id, "method": "Page.navigate", "params": {"url": "https://gemini.google.com/app"}}}, timeout=10.0, profile=prof)
+                except Exception as nav_e:
+                    print(f"[GeminiDriver] Navigation error: {nav_e}")
+                time.sleep(3.0)
+                try:
+                    self.inject_helper(tab_id, profile=prof)
+                except Exception as inj_e:
+                    print(f"[GeminiDriver] Helper re-injection error: {inj_e}")
+                time.sleep(0.5)
+
+            res = self.execute_js(tab_id, del_js, profile=prof)
+            if res and res.get("ok"):
+                inner = res.get("result")
+                if isinstance(inner, dict) and inner.get("ok"):
+                    break
+                err_detail = inner.get("error") if isinstance(inner, dict) else res.get("error")
+                print(f"[GeminiDriver] Deletion JS reported failure on attempt {attempt}: {err_detail}")
+            else:
+                print(f"[GeminiDriver] execute_js failed on attempt {attempt}: {res.get('error') if res else 'None'}")
+
         print(f"[GeminiDriver] Deletion result: {res}")
 
-        if meta and meta.get("own_tab"):
+        if close_tab or own_tab:
             try:
                 self._call_api("/command", {"action": "CLOSE_TAB", "agent_guarded": True, "params": {"tabId": tab_id}}, profile=prof)
-            except Exception:
-                pass
+                print(f"[GeminiDriver] Closed finished agent tab {tab_id} on {prof}.")
+            except Exception as close_e:
+                print(f"[GeminiDriver] Could not close finished agent tab {tab_id}: {close_e}")
 
         if session_id in self.registry:
             del self.registry[session_id]
@@ -2788,7 +2831,8 @@ if __name__ == "__main__":
     parser.add_argument("--thinking", default="High", choices=["Low", "Medium", "High"], help="Thinking level (default: High)")
     parser.add_argument("--deep-research", action="store_true", help="Enable Deep research mode (Chat mode; runs on 4 Neon High)")
     parser.add_argument("--new-chat", action="store_true", help="Open a fresh new chat session")
-    parser.add_argument("--auto-clean", action="store_true", help="Automatically delete chat from sidebar after response")
+    parser.add_argument("--auto-clean", "--clean", action="store_true", dest="auto_clean", help="Automatically delete chat from sidebar after response")
+    parser.add_argument("--keep-tab", action="store_true", help="Keep the browser tab open after auto-clean (default: closes tab on clean)")
     parser.add_argument("--usage", action="store_true", help="Audit and display live usage quota on profile without sending prompt")
     parser.add_argument("--no-usage", action="store_true", help="Skip post-request usage check")
     parser.add_argument("--session", default="main", help="Session identifier for multi-turn")
@@ -2828,7 +2872,7 @@ if __name__ == "__main__":
         res = driver.cleanup_all()
         print("Cleanup results:", json.dumps(res, indent=2))
     elif args.delete:
-        res = driver.delete_session(args.delete)
+        res = driver.delete_session(args.delete, close_tab=not args.keep_tab)
         print("Delete result:", json.dumps(res, indent=2))
     elif args.prompt:
         sid = driver.create_session(subagent=args.session, new_chat=args.new_chat, profile_dir=args.profile)
@@ -2841,6 +2885,8 @@ if __name__ == "__main__":
             thinking=args.thinking,
             mode=effective_mode,
             check_usage=not args.no_usage,
+            clean=args.auto_clean,
+            keep_tab=args.keep_tab,
         )
         if res.get("ok"):
             print("\n" + "=" * 80)
@@ -2854,9 +2900,9 @@ if __name__ == "__main__":
             if res.get("usage"):
                 u = res.get("usage")
                 print(f"Live Quota: {u.get('current_usage_percent')}% used ({u.get('current_reset')}) | Weekly: {u.get('weekly_usage_percent')}% used")
-            if args.auto_clean:
+            if args.auto_clean and sid in driver.registry:
                 print(f"[GeminiDriver] Auto-cleaning session '{sid}'...")
-                driver.delete_session(sid)
+                driver.delete_session(sid, close_tab=not args.keep_tab)
         else:
             print("Error:", res.get("error"))
     else:

@@ -30,6 +30,7 @@ description: "Generalized browser automation suite uniting Playwright numeric DO
 - **Priority Tiering**: Always drain **Tier-1 Alt Profiles** first across rolling quota windows. **Tier-2 Daily Drivers** are strictly last resort.
 - **User Tab Protection**: Agent processes must NEVER close, modify, or steal focus from tabs opened by the human user.
 - **Port 9229 Daemon**: Bridge server on `127.0.0.1:9229` auto-boots if not running.
+- **Auto-Reaper**: Daemon automatically reaps blank tabs and idle unused Tier-1 Alt profiles (60s timer, `POST /cleanup/idle`).
 
 ---
 
@@ -50,6 +51,9 @@ python .agents/skills/browser-operator/scripts/browser_operator.py click 3
 
 # 5. Extract structured content (markdown, tables, forms)
 python .agents/skills/browser-operator/scripts/browser_operator.py read --format markdown
+
+# 6. Reap blank tabs and idle Tier-1 Alt profiles on demand
+python .agents/skills/browser-operator/argon_bridge/profile_rotator.py cleanup --idle-seconds 0
 ```
 
 ---

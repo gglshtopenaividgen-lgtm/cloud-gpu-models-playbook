@@ -712,24 +712,36 @@ class TestAIStudioAndGeminiReliabilityAndRecovery(unittest.TestCase):
         self.assertNotIn("Page.reload", actions)
 
     def test_aistudio_reclaims_only_when_a_tab_can_keep_its_window_open(self):
-        own_tab = {"id": 123, "windowId": 11}
-        for sibling_window, expected_close in ((11, True), (22, False)):
-            actions = []
+        """Under Wave 6B, reclaim_finished_tab always attempts CLOSE_TAB first, falling back to parking at about:blank if CLOSE_TAB fails."""
+        # Case 1: CLOSE_TAB succeeds
+        actions = []
+        def bridge_success(endpoint, method="GET", payload=None, timeout=30.0):
+            actions.append(payload)
+            return {"ok": True}
 
-            def bridge(endpoint, method="GET", payload=None, timeout=30.0):
-                actions.append(payload)
-                return {"ok": True, "tabs": [own_tab, {"id": 456, "windowId": sibling_window}]}
+        with mock.patch.object(ais, "call_bridge_api", side_effect=bridge_success):
+            ais.reclaim_finished_tab("Profile 14", 123)
 
-            with mock.patch.object(ais, "call_bridge_api", side_effect=bridge):
-                ais.reclaim_finished_tab("Profile 14", 123)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action"], "CLOSE_TAB")
+        self.assertEqual(actions[0]["params"]["tabId"], 123)
+        self.assertTrue(actions[0]["agent_guarded"])
 
-            self.assertEqual(actions[0]["action"], "LIST_TABS")
-            operation = actions[1]
-            self.assertEqual(operation["action"], "CLOSE_TAB" if expected_close else "CDP_COMMAND")
-            self.assertEqual(operation["params"]["tabId"], 123)
-            self.assertTrue(operation["agent_guarded"])
-            if not expected_close:
-                self.assertEqual(operation["params"]["params"]["url"], "about:blank")
+        # Case 2: CLOSE_TAB fails -> falls back to parking at about:blank
+        actions_fallback = []
+        def bridge_fallback(endpoint, method="GET", payload=None, timeout=30.0):
+            actions_fallback.append(payload)
+            if payload and payload.get("action") == "CLOSE_TAB":
+                return {"ok": False, "error": "tab closed or locked"}
+            return {"ok": True}
+
+        with mock.patch.object(ais, "call_bridge_api", side_effect=bridge_fallback):
+            ais.reclaim_finished_tab("Profile 14", 123)
+
+        self.assertEqual(len(actions_fallback), 2)
+        self.assertEqual(actions_fallback[0]["action"], "CLOSE_TAB")
+        self.assertEqual(actions_fallback[1]["action"], "CDP_COMMAND")
+        self.assertEqual(actions_fallback[1]["params"]["params"]["url"], "about:blank")
 
     def test_consult_argon_status_banner_format(self):
         banner = ca.format_status_banner({
