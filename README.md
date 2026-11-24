@@ -41,7 +41,7 @@
 | [`recipes/modal_llama_template.py`](./recipes/modal_llama_template.py) | Production `@modal.web_server` deployment template |
 | [`guardrails/PITFALLS_AND_LIMITS.md`](./guardrails/PITFALLS_AND_LIMITS.md) | Distilled hardware limits, OOM fixes, Diffusers/torchao/bnb shields, and AUP rules |
 | [`research/`](./research/INDEX.md) | Deep architectural dossiers (sub-2-bit ternary, steering, TPU Pallas, audio/avatar, humanlike chat, flow diffusion, loop agents, sovereign memory, `ik_llama.cpp` CPU MoEs, platform quotas) |
-| [`portable-brain/`](./portable-brain/README.md) | Sanitized, path-independent **Portable Brain** (`brain_cli.py`, 12 universal `.agents/skills/`, universal `.agents/rules/`, UI anti-slop guide, external harness rules) |
+| [`portable-brain/`](./portable-brain/README.md) | Sanitized, path-independent **Portable Brain** (`brain_cli.py`, 13 universal `.agents/skills/`, universal `.agents/rules/`, UI anti-slop guide, external harness rules) |
 
 ---
 

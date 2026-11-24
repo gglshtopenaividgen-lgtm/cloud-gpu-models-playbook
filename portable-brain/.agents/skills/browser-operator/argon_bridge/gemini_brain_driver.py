@@ -307,13 +307,40 @@ class GeminiBrainDriver:
         except Exception as e:
             print(f"[GeminiDriver] Warning saving registry: {e}", file=sys.stderr)
 
+    @staticmethod
+    def _get_current_desktop_name() -> str:
+        if sys.platform != "win32":
+            return "Default"
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+            user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+            user32.GetThreadDesktop.restype = wintypes.HANDLE
+            user32.GetUserObjectInformationW.argtypes = [
+                wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+            ]
+            user32.GetUserObjectInformationW.restype = wintypes.BOOL
+            hdesk = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+            buf = ctypes.create_unicode_buffer(256)
+            needed = wintypes.DWORD()
+            ok = hdesk and user32.GetUserObjectInformationW(hdesk, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed))
+            if ok and buf.value:
+                return buf.value
+        except Exception:
+            pass
+        return "unknown"
+
     def ensure_bridge_running(self) -> bool:
-        """Checks GET /health -> GET /status with 5s timeout and 1 retry before launching server.py."""
-        for attempt in range(2):
+        """Checks GET /health -> GET /status with retries; refuses rogue exebox daemon launches."""
+        for attempt in range(5):
             for ep in ("/health", "/status"):
                 try:
                     req = urllib.request.Request(f"{self.bridge_url}{ep}", method="GET")
-                    with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    with urllib.request.urlopen(req, timeout=2.5) as resp:
                         if resp.status == 200:
                             return True
                 except urllib.error.HTTPError as e:
@@ -321,8 +348,17 @@ class GeminiBrainDriver:
                         continue
                 except Exception:
                     break
-            if attempt == 0:
+            if attempt < 4:
                 time.sleep(0.5)
+
+        desktop = self._get_current_desktop_name()
+        if sys.platform == "win32" and desktop.lower() != "default" and os.environ.get("AGY_ALLOW_HEADLESS_BRIDGE") != "1":
+            print(
+                f"[GeminiDriver] Refusing to start non-interactive bridge daemon in WinSta0\\{desktop}. "
+                "Start C:\\Users\\Flh\\Desktop\\Start_Gemini_Session.bat on Desktop.",
+                file=sys.stderr,
+            )
+            return False
 
         print("[GeminiDriver] Bridge daemon not detected. Launching server.py daemon...")
         server_py = Path(__file__).parent / "server.py"
@@ -1284,10 +1320,10 @@ class GeminiBrainDriver:
             return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
         };
         const inputArea = document.querySelector(
-            'input-container, .input-area-container, .text-input-field, form, rich-textarea'
+            'input-area-v2, input-container, .input-area-container, .text-input-field, form, rich-textarea'
         ) || document.body;
         const chips = Array.from(inputArea.querySelectorAll(
-            'button, mat-chip, .tool-chip, [role="button"], .pill'
+            'button, mat-chip, mat-chip-row, .tool-chip, [role="button"], .pill, [class*="chip"], [class*="tool"]'
         )).filter(isVis);
         for (const c of chips) {
             const txt = ((c.innerText || '') + ' ' + (c.getAttribute('aria-label') || '')).toLowerCase();
@@ -1302,6 +1338,19 @@ class GeminiBrainDriver:
         if isinstance(r_chk, dict) and r_chk.get("result") is True:
             return True
 
+        # Zero-state composer ('Where should we start?') hides full toolbar & More tools items until editor is focused/woken
+        wake_js = """
+        const ed = document.querySelector('.ql-editor, rich-textarea div[contenteditable="true"], div[role="textbox"][contenteditable="true"]');
+        if (ed && !(ed.innerText || '').trim()) {
+            ed.focus();
+            try { document.execCommand('insertText', false, ' '); } catch (e) {}
+            return true;
+        }
+        return false;
+        """
+        self.execute_js(tab_id, wake_js, timeout=10.0, profile=prof)
+        time.sleep(0.4)
+
         click_dr_js = """
         const isVis = (el) => {
             if (!el) return false;
@@ -1310,7 +1359,7 @@ class GeminiBrainDriver:
             return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
         };
         const dr = Array.from(document.querySelectorAll(
-            '.cdk-overlay-pane button, .cdk-overlay-container [role="menuitem"], .cdk-overlay-container .mat-mdc-list-item, button, [role="menuitem"], .mat-mdc-list-item'
+            '.cdk-overlay-pane gem-menu-item, .cdk-overlay-container gem-menu-item, [role="menuitemcheckbox"], [role="menuitem"], .cdk-overlay-pane button, .cdk-overlay-container .mat-mdc-list-item, button, .mat-mdc-list-item'
         )).filter(isVis).find(b => {
             const t = ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().trim();
             return t === 'deep research' || t.includes('deep research');
@@ -1390,7 +1439,7 @@ class GeminiBrainDriver:
             return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
         };
         const mt = Array.from(document.querySelectorAll(
-            '[data-test-id="more-tools-button"], button.more-tools-button, button.toolbox-drawer-menu-item, button[aria-label="More tools"], .cdk-overlay-pane button'
+            '.cdk-overlay-pane gem-menu-item, .cdk-overlay-container gem-menu-item, [role="menuitem"], [data-test-id="more-tools-button"], button.more-tools-button, button.toolbox-drawer-menu-item, button[aria-label="More tools"], .cdk-overlay-pane button'
         )).filter(isVis).find(b => ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().includes('more tools'));
         return Boolean(mt);
         """
@@ -1446,7 +1495,7 @@ class GeminiBrainDriver:
             print("[GeminiDriver] Deep Research toggle failed: More tools / Tools / Deep Research option not visible", file=sys.stderr)
             return False
 
-        click_mt_js = """
+        hover_mt_js = """
         const isVis = (el) => {
             if (!el) return false;
             const r = el.getBoundingClientRect();
@@ -1454,22 +1503,28 @@ class GeminiBrainDriver:
             return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
         };
         const mt = Array.from(document.querySelectorAll(
-            '[data-test-id="more-tools-button"], button.more-tools-button, button.toolbox-drawer-menu-item, button[aria-label="More tools"], .cdk-overlay-pane button'
+            '.cdk-overlay-pane gem-menu-item, .cdk-overlay-container gem-menu-item, [role="menuitem"], [data-test-id="more-tools-button"], button.more-tools-button, button.toolbox-drawer-menu-item, button[aria-label="More tools"], .cdk-overlay-pane button'
         )).filter(isVis).find(b => ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().includes('more tools'));
         if (!mt) return false;
-        mt.click();
+        mt.dispatchEvent(new MouseEvent('pointerenter', { bubbles: true }));
+        mt.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        mt.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
         return true;
         """
-        self.execute_js(tab_id, click_mt_js, timeout=10.0, profile=prof)
+        click_mt_fallback_js = hover_mt_js + "\n; const mt2 = Array.from(document.querySelectorAll('.cdk-overlay-pane gem-menu-item, .cdk-overlay-container gem-menu-item, [role=\"menuitem\"], button')).find(b => ((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase().includes('more tools')); if (mt2) mt2.click();"
+        self.execute_js(tab_id, hover_mt_js, timeout=10.0, profile=prof)
         self._nudge_compositor(tab_id, profile=prof)
 
         dr_clicked = False
-        for _ in range(12):
-            time.sleep(0.15)
+        for poll_i in range(12):
+            time.sleep(0.18)
             dr_res = self.execute_js(tab_id, click_dr_js, timeout=10.0, profile=prof)
             if isinstance(dr_res, dict) and dr_res.get("result") is True:
                 dr_clicked = True
                 break
+            if poll_i == 5:
+                self.execute_js(tab_id, click_mt_fallback_js, timeout=10.0, profile=prof)
+                self._nudge_compositor(tab_id, profile=prof)
 
         if not dr_clicked:
             print("[GeminiDriver] Deep Research toggle failed: Deep research option not found in More tools submenu", file=sys.stderr)
@@ -1594,21 +1649,44 @@ class GeminiBrainDriver:
                     self.execute_js(tab_id, click_new, profile=prof)
                     self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=prof)
             else:
-                open_res = self._call_api(
-                    "/command",
-                    {
-                        "action": "OPEN_TAB",
-                        "owner": f"gemini_driver:{session_id}",
-                        "surface": "gemini_web",
-                        "agent_guarded": True,
-                        "params": {"url": "https://gemini.google.com/app", "active": True},
-                    },
-                    profile=prof,
-                )
-                if open_res.get("code") == "AGENT_CAPACITY_REACHED":
-                    raise RuntimeError(f"AGENT_CAPACITY_REACHED: {open_res.get('error')}")
-                tab_id = open_res.get("tabId")
-                self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=prof)
+                reusable_blank = None
+                owned_ids = self._get_owned_tab_ids(profile=prof)
+                if owned_ids:
+                    t_res = self._call_api_raw("/command", {"action": "LIST_TABS", "profile": prof}, profile=prof)
+                    for t in (t_res.get("tabs", []) if isinstance(t_res, dict) else []):
+                        if str(t.get("id")) in owned_ids:
+                            tu = (t.get("url") or t.get("pendingUrl") or "").strip().lower()
+                            if tu in ("", "about:blank", "chrome://newtab/", "chrome://newtab"):
+                                reusable_blank = t
+                                break
+                if reusable_blank:
+                    tab_id = reusable_blank["id"]
+                    self._call_api(
+                        "/command",
+                        {
+                            "action": "CDP_COMMAND",
+                            "agent_guarded": True,
+                            "params": {"tabId": tab_id, "method": "Page.navigate", "params": {"url": "https://gemini.google.com/app"}},
+                        },
+                        profile=prof,
+                    )
+                    self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=prof)
+                else:
+                    open_res = self._call_api(
+                        "/command",
+                        {
+                            "action": "OPEN_TAB",
+                            "owner": f"gemini_driver:{session_id}",
+                            "surface": "gemini_web",
+                            "agent_guarded": True,
+                            "params": {"url": "https://gemini.google.com/app", "active": True},
+                        },
+                        profile=prof,
+                    )
+                    if open_res.get("code") == "AGENT_CAPACITY_REACHED":
+                        raise RuntimeError(f"AGENT_CAPACITY_REACHED: {open_res.get('error')}")
+                    tab_id = open_res.get("tabId")
+                    self.wait_for_page_ready(tab_id, timeout_sec=25.0, profile=prof)
 
         self.registry[session_id] = {
             "session_id": session_id,
@@ -2675,6 +2753,7 @@ class GeminiBrainDriver:
     def delete_session(self, session_id: str, profile: Optional[str] = None, max_retries: int = 2, close_tab: bool = False) -> Dict[str, Any]:
         """Deletes chat from sidebar (Hover -> 3-dots -> Delete -> Confirm modal). Retries on failure."""
         meta = self.registry.get(session_id)
+        turns_sent = int(meta.get("turns", 0) or 0) if meta else 0
         if meta:
             tab_id = self.tab_id or meta.get("tab_id")
             chat_id = meta.get("chat_id")
@@ -2690,6 +2769,26 @@ class GeminiBrainDriver:
             own_tab = False
 
         target_cid = chat_id or ""
+        if meta and turns_sent == 0 and not target_cid:
+            # No prompt/turn was ever completed; check URL only before deciding sidebar delete
+            url_probe = self.execute_js(tab_id, "return window.location.href || '';", profile=prof) if tab_id else {}
+            cur_url = str(url_probe.get("result") or "") if isinstance(url_probe, dict) and url_probe.get("ok") else ""
+            if "/app/" in cur_url:
+                extracted = cur_url.split("/app/", 1)[1].split("?", 1)[0].split("/", 1)[0].strip()
+                if extracted:
+                    target_cid = extracted
+            if not target_cid:
+                if (close_tab or own_tab) and tab_id:
+                    try:
+                        self._call_api("/command", {"action": "CLOSE_TAB", "agent_guarded": True, "params": {"tabId": tab_id}}, profile=prof)
+                        print(f"[GeminiDriver] Closed unused agent tab {tab_id} on {prof} (skipped sidebar delete).")
+                    except Exception as close_e:
+                        print(f"[GeminiDriver] Could not close unused agent tab {tab_id}: {close_e}")
+                if session_id in self.registry:
+                    del self.registry[session_id]
+                    self._save_registry()
+                return {"ok": True, "skipped_sidebar_delete": True, "reason": "no_chat_created"}
+
         print(f"[GeminiDriver] Deleting chat {target_cid or 'latest'} from sidebar on {prof or 'active'}...")
         try:
             self._call_api("/command", {"action": "CDP_COMMAND", "params": {"tabId": tab_id, "method": "Page.bringToFront"}}, timeout=5.0, profile=prof)

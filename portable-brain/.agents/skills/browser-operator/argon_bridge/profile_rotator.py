@@ -43,11 +43,21 @@ def _get_current_desktop_name() -> str:
     if sys.platform != "win32":
         return "Default"
     try:
+        from ctypes import wintypes
+
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+        user32.GetThreadDesktop.restype = wintypes.HANDLE
+        user32.GetUserObjectInformationW.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetUserObjectInformationW.restype = wintypes.BOOL
         hdesk = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
         buf = ctypes.create_unicode_buffer(256)
-        ok = user32.GetUserObjectInformationW(hdesk, 2, buf, ctypes.sizeof(buf), None)
+        needed = wintypes.DWORD()
+        ok = hdesk and user32.GetUserObjectInformationW(hdesk, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed))
         if ok and buf.value:
             return buf.value
     except Exception:
@@ -507,7 +517,11 @@ def open_profile(
 
     open_dirs = [d for d, item in states.items() if item["is_open"] and d != p.dir_name]
     at_agent_cap = len(active_agent_profiles) >= max_open
-    at_open_cap = len(open_dirs) >= max_open
+    managed_open_dirs = [
+        directory for directory in open_dirs
+        if directory in active_agent_profiles or not states[directory]["profile"].is_daily_driver
+    ]
+    at_open_cap = len(managed_open_dirs) >= max_open
     if (at_agent_cap or at_open_cap) and not setup:
         closed_idle_profile = None
         if auto_close_idle:
@@ -529,7 +543,8 @@ def open_profile(
                 "code": code,
                 "error": (
                     f"Agent/RAM guard: active_agent_profiles={len(active_agent_profiles)}/{max_open} "
-                    f"({active_agent_profiles}), open_profiles={len(open_dirs)}/{max_open} ({open_dirs}). "
+                    f"({active_agent_profiles}), managed_open_profiles={len(managed_open_dirs)}/{max_open} "
+                    f"({managed_open_dirs}). "
                     "Reuse an already-open idle Tier 1 Alt or release an agent-launched profile first."
                 ),
                 "open_profiles": open_dirs,

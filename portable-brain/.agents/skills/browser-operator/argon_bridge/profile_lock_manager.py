@@ -540,44 +540,60 @@ def is_bridge_running(timeout: float = 2.5) -> bool:
     import urllib.request
     import urllib.error
 
-    for attempt in range(2):
-        for ep in ("/health", "/status"):
-            try:
-                with urllib.request.urlopen(f"http://127.0.0.1:9229{ep}", timeout=timeout) as resp:
-                    if resp.status == 200:
-                        return True
-            except urllib.error.HTTPError as e:
-                if e.code == 404 and ep == "/health":
-                    continue
-            except Exception:
-                break
-        if attempt == 0:
-            time.sleep(0.3)
+    for endpoint in ("/health", "/status"):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:9229{endpoint}", timeout=timeout) as response:
+                if response.status == 200:
+                    return True
+        except OSError:
+            continue
     return False
 
 
-def ensure_bridge_running() -> bool:
-    """Attempts to auto-start the local Argon Bridge server if not already running."""
-    if is_bridge_running():
+def ensure_bridge_running(timeout: float = 2.5) -> bool:
+    """Wait for a restarting bridge before considering an interactive auto-start."""
+
+    def wait_for_bridge(seconds: float) -> bool:
+        deadline = time.monotonic() + max(seconds, 0.0)
+        while True:
+            remaining = deadline - time.monotonic()
+            if is_bridge_running(timeout=max(0.05, min(0.25, remaining / 2))):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.5, remaining))
+
+    if wait_for_bridge(timeout):
         return True
+    if sys.platform == "win32" and os.environ.get("AGY_ALLOW_HEADLESS_BRIDGE") != "1":
+        from profile_rotator import _get_current_desktop_name
+
+        desktop = _get_current_desktop_name()
+        if desktop.lower() != "default":
+            print(
+                f"[ProfileLock] Refusing to start non-interactive bridge daemon in WinSta0\\{desktop}. "
+                "Start Start_Gemini_Session.bat on Desktop.",
+                file=sys.stderr,
+            )
+            return False
+
     try:
         import subprocess
+
         server_path = Path(__file__).parent / "server.py"
-        if server_path.exists():
+        if server_path.is_file():
             subprocess.Popen(
                 [sys.executable, str(server_path)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            t0 = time.time()
-            while time.time() - t0 < 3.0:
-                time.sleep(0.3)
-                if is_bridge_running():
-                    print("[ProfileLock] Auto-started Argon Bridge daemon (127.0.0.1:9229).")
-                    return True
-    except Exception as e:
-        print(f"[ProfileLock] Note: bridge auto-start: {e}", file=sys.stderr)
+            if wait_for_bridge(timeout):
+                print("[ProfileLock] Auto-started Argon Bridge daemon (127.0.0.1:9229).")
+                return True
+    except OSError as exc:
+        print(f"[ProfileLock] Note: bridge auto-start: {exc}", file=sys.stderr)
     return False
 
 
@@ -606,14 +622,35 @@ def _get_bridge_status_json() -> Dict[str, Any]:
         return {}
 
 
-def _get_bridge_resources_json() -> Dict[str, Any]:
+def _get_bridge_resources_json(reconcile: bool = False) -> Dict[str, Any]:
     try:
         import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:9229/resources", timeout=3.0) as resp:
+
+        url = "http://127.0.0.1:9229/resources"
+        if reconcile:
+            url += "?reconcile=1"
+        with urllib.request.urlopen(url, timeout=12.0 if reconcile else 3.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _cleanup_idle_bridge_resources() -> None:
+    """Ask the interactive bridge to reclaim only safe idle agent resources."""
+    import urllib.request
+
+    request = urllib.request.Request(
+        "http://127.0.0.1:9229/cleanup/idle",
+        data=b'{"idle_seconds": 0}',
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20.0):
+            pass
+    except OSError as exc:
+        print(f"[ProfileLock] Idle cleanup unavailable: {exc}", file=sys.stderr)
 
 
 def _is_profile_truly_open(profile: str) -> bool:
@@ -679,27 +716,29 @@ def pick_optimal_idle_profile(
     surface: Optional[str] = None,
     bucket: Optional[str] = None,
     max_open: int = 3,
+    *,
+    allow_daily_driver: bool = False,
+    explicit_preferred: Optional[str] = None,
 ) -> Optional[str]:
-    """Waterfall Drain selector across all AI Pro profiles:
-
-    1. Partition Tier 1 Alt Pros vs Tier 2 Daily Drivers (strictly last resort).
-    2. Within each tier, drain ALREADY-OPEN profiles (`LIST_TABS > 0`) completely before launching closed ones.
-    3. Verify surface lock (`f'{profile}::{surface}'`), bucket cooldown, `NEEDS_REAUTH`, and 95% 5h usage guard.
-    4. If no open Tier 1 Alt is ready and host daemon is interactive (`WinSta0\\Default`), launch next idle Tier 1 Alt
-       via `/profile/open` (`auto_close_idle=True`); otherwise emit `[PROFILE_ROTATION_NEEDED]`.
-    5. Only select Tier 2 Daily Drivers if ALL Tier 1 Alts are unavailable/exhausted (`[LAST_RESORT_DAILY_DRIVER]`).
-    """
-    ensure_bridge_running()
+    """Drain Tier 1 first, allowing Tier 2 for exhausted fleet or explicit opt-in."""
+    if not ensure_bridge_running():
+        return None
     max_open = max(1, min(int(max_open or 3), 3))
-    active_locks = clean_expired_locks()
-    status_map = get_live_profile_status()
-    bridge_status = _get_bridge_status_json()
-    resources_data = _get_bridge_resources_json()
-    active_agent_profiles = set(resources_data.get("active_agent_profiles") or [])
-    max_agent_profiles = min(max_open, int(resources_data.get("max_agent_profiles") or max_open))
-    connected_dirs = {c.get("dir_name") for c in bridge_status.get("connected_extensions", []) if c.get("dir_name")}
-    interactive_host = bool(bridge_status.get("interactive_desktop", False))
 
+    def refresh():
+        resources = _get_bridge_resources_json(reconcile=True)
+        bridge = _get_bridge_status_json()
+        connected = {item["dir_name"] for item in bridge.get("connected_extensions", []) if item.get("dir_name")}
+        return (
+            clean_expired_locks(),
+            get_live_profile_status(),
+            set(resources.get("active_agent_profiles") or []),
+            min(max_open, int(resources.get("max_agent_profiles") or max_open)),
+            {profile for profile in connected if _is_profile_truly_open(profile)},
+            bool(bridge.get("interactive_desktop")),
+        )
+
+    active_locks, status_map, active_agent_profiles, max_agent_profiles, open_set, interactive_host = refresh()
     base_order = preferred_order or get_fleet_order()
     tier1_order: List[str] = []
     tier2_order: List[str] = []
@@ -709,9 +748,6 @@ def pick_optimal_idle_profile(
             tier2_order.append(prof)
         else:
             tier1_order.append(prof)
-
-    open_dirs = [p for p in connected_dirs if _is_profile_truly_open(p)]
-    open_set = set(open_dirs)
 
     def _is_candidate_eligible(prof: str) -> Tuple[bool, str]:
         if _find_active_lock(active_locks, prof, surface=surface):
@@ -730,9 +766,12 @@ def pick_optimal_idle_profile(
         open_other = [p for p in candidates if p in open_set and p not in active_agent_profiles]
         closed_cands = [p for p in candidates if p not in open_set]
         ordered = open_agent_first + open_other + closed_cands
+        if explicit_preferred in ordered:
+            ordered.remove(explicit_preferred)
+            ordered.insert(0, explicit_preferred)
 
         for prof in ordered:
-            ok, reason = _is_candidate_eligible(prof)
+            ok, _ = _is_candidate_eligible(prof)
             if not ok:
                 continue
             # Never exceed MAX_AGENT_PROFILES (3) by expanding onto a 4th distinct profile
@@ -742,7 +781,7 @@ def pick_optimal_idle_profile(
             if prof in open_set and ping_profile(prof):
                 print(f"[ProfileLock] {tier_tag} Waterfall Drain selected open profile '{prof}'.")
                 return prof
-            if interactive_host or prof in connected_dirs:
+            if interactive_host:
                 if launch_profile_candidate(prof, max_open=max_open, auto_close_idle=True):
                     t0 = time.time()
                     while time.time() - t0 < 8.0:
@@ -752,22 +791,43 @@ def pick_optimal_idle_profile(
                         time.sleep(0.5)
         return None
 
+    def tier1_has_quota() -> bool:
+        return any(
+            info.get("has_bridge_extension")
+            and not info.get("is_daily_driver")
+            and (info.get("current_usage_percent") or 0) < 95
+            and is_bucket_available(prof, bucket=bucket)
+            for prof, info in status_map.items()
+        )
+
     chosen = _try_tier(tier1_order, is_daily_tier=False)
     if chosen:
         return chosen
 
-    # Non-blocking rotation guidance if Tier 1 open profiles are exhausted and host rotation couldn't open a cold one
-    idle_closed_tier1 = [p for p in tier1_order if p not in open_set and _is_candidate_eligible(p)[0]]
-    if idle_closed_tier1 and not interactive_host:
-        print(
-            f"[PROFILE_ROTATION_NEEDED] Active Tier 1 Alt profile(s) ({open_dirs or 'none'}) exhausted on bucket '{bucket or 'default'}'. "
-            f"Close an exhausted profile and open '{idle_closed_tier1[0]}' (or start Start_Gemini_Session.bat on Desktop).",
-            file=sys.stderr,
-        )
+    any_tier1_has_quota = tier1_has_quota()
+    if any_tier1_has_quota and interactive_host:
+        _cleanup_idle_bridge_resources()
+        active_locks, status_map, active_agent_profiles, max_agent_profiles, open_set, interactive_host = refresh()
+        chosen = _try_tier(tier1_order, is_daily_tier=False)
+        if chosen:
+            return chosen
+        any_tier1_has_quota = tier1_has_quota()
+
+    daily_driver_allowed = allow_daily_driver or explicit_preferred in tier2_order
+    if any_tier1_has_quota and not daily_driver_allowed:
+        if not interactive_host:
+            detail = "Start Start_Gemini_Session.bat on Desktop to open a Tier-1 profile."
+        elif len(active_agent_profiles) >= max_agent_profiles:
+            detail = "Agent profile capacity is full after idle cleanup."
+        else:
+            detail = "Tier-1 launches were unavailable; check active leases and bridge connections."
+        print(f"[TIER1_ROTATION_NEEDED] Tier-1 Alts still have quota. {detail}", file=sys.stderr)
+        return None
 
     chosen_daily = _try_tier(tier2_order, is_daily_tier=True)
     if chosen_daily:
-        print(f"[LAST_RESORT_DAILY_DRIVER] All Tier 1 Alt accounts exhausted/offline; falling back to '{chosen_daily}'.", file=sys.stderr)
+        reason = "Daily Driver explicitly allowed" if any_tier1_has_quota else "No bridged Tier-1 Alt has quota"
+        print(f"[LAST_RESORT_DAILY_DRIVER] {reason}; selected '{chosen_daily}'.", file=sys.stderr)
         return chosen_daily
 
     print("[ProfileLock] All AI Pro profiles exhausted, busy, or offline.")
@@ -797,6 +857,8 @@ def acquire_profile_lease(
     surface: Optional[str] = None,
     bucket: Optional[str] = None,
     max_open: int = 3,
+    *,
+    allow_daily_driver: bool = False,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Acquires a surface-scoped profile lease using 11-profile Waterfall Drain & 4-bucket quota state."""
     if surface == FLOW_SURFACE:
@@ -815,18 +877,14 @@ def acquire_profile_lease(
             if (not match or match[1].get("agent_id") == agent_id) and is_bucket_available(bound_prof, bucket=bucket):
                 target_prof = bound_prof
 
-    if not target_prof and preferred_profile:
-        match = _find_active_lock(active_locks, preferred_profile, surface=surface)
-        if match and match[1].get("agent_id") != agent_id:
-            rem = max(0, int(match[1].get("expires_at", now) - now))
-            print(f"[ProfileLock] '{preferred_profile}' ({surface or 'all'}) BUSY ({rem}s remaining). Routing to Waterfall Drain...")
-            target_prof = pick_optimal_idle_profile(surface=surface, bucket=bucket, max_open=max_open)
-        else:
-            pref_order = [preferred_profile] + [p for p in get_fleet_order() if p != preferred_profile]
-            target_prof = pick_optimal_idle_profile(preferred_order=pref_order, surface=surface, bucket=bucket, max_open=max_open)
-
     if not target_prof:
-        target_prof = pick_optimal_idle_profile(surface=surface, bucket=bucket, max_open=max_open)
+        pref_order = None
+        if preferred_profile:
+            pref_order = [preferred_profile] + [p for p in get_fleet_order() if p != preferred_profile]
+        target_prof = pick_optimal_idle_profile(
+            preferred_order=pref_order, surface=surface, bucket=bucket, max_open=max_open,
+            explicit_preferred=preferred_profile, allow_daily_driver=allow_daily_driver,
+        )
 
     if not target_prof:
         return None, f"All AI Pro profiles are offline, busy, or exhausted on bucket '{bucket or 'default'}'."

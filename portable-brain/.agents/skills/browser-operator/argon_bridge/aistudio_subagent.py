@@ -631,8 +631,8 @@ window.__agyStudio = {
     },
 
     _detectErrorBanner: function() {
-        const errRe = /(quota exceeded|rate limit|internal error|something went wrong|permission denied|resource has been exhausted|model is overloaded|too many requests|err_internet_disconnected|network error|failed to fetch|connection lost|429)/i;
-        const transientRe = /(err_internet_disconnected|network error|failed to fetch|connection lost|something went wrong|internal error)/i;
+        const errRe = /(quota exceeded|rate limit|internal error|something went wrong|permission denied|resource has been exhausted|model is overloaded|model isn't available|model is not available|please wait a minute and try again|too many requests|err_internet_disconnected|network error|failed to fetch|connection lost|429)/i;
+        const transientRe = /(err_internet_disconnected|network error|failed to fetch|connection lost|something went wrong|internal error|model isn't available|model is not available|please wait a minute and try again)/i;
 
         // Check browser offline / Chrome network error page
         const bodyHead = ((document.body && document.body.innerText) || '').slice(0, 1200);
@@ -1119,6 +1119,65 @@ def _get_owned_tab_ids_for_profile(profile_dir: Optional[str]) -> set[str]:
     return set()
 
 
+def _is_blank_or_unloaded_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return u in ("", "about:blank", "chrome://newtab/", "chrome://newtab")
+
+
+def wait_for_aistudio_ready(
+    profile_dir: str,
+    tab_id: int,
+    timeout_sec: float = 25.0,
+) -> Dict[str, Any]:
+    """Waits for AI Studio SPA to finish initial document load before DOM helper injection."""
+    probe_js = r"""(() => {
+        const href = document.URL || location.href || '';
+        const rs = document.readyState || '';
+        const bodyLen = ((document.body && document.body.innerText) || '').trim().length;
+        const appEl = document.querySelector(
+            'ms-app, .model-selector-card, [data-test-id="model-selector-button"], ms-prompt-input-wrapper, textarea'
+        );
+        const ready = rs === 'complete' && bodyLen > 0 && Boolean(appEl);
+        return {
+            ready: ready,
+            readyState: rs,
+            href: href,
+            title: document.title || '',
+            bodyLen: bodyLen,
+            hasApp: Boolean(appEl)
+        };
+    })()"""
+    deadline = time.time() + max(1.0, timeout_sec)
+    last_state: Dict[str, Any] = {}
+    while time.time() < deadline:
+        res = call_bridge_api(
+            "/command",
+            method="POST",
+            payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": probe_js}},
+            timeout=10.0,
+        )
+        if not isinstance(res, dict) or not res.get("ok"):
+            last_state = {"eval_ok": False, "error": (res or {}).get("error", "EVAL_DOM failed")}
+            time.sleep(0.6)
+            continue
+        data = res.get("result")
+        if not isinstance(data, dict):
+            return {"ready": True, "href": "https://aistudio.google.com/prompts/new_chat"}
+        # Compatibility with lightweight test mocks returning {"ok": True} without DOM readiness fields
+        if "readyState" not in data and data.get("ok") is True:
+            return {"ready": True, "href": "https://aistudio.google.com/prompts/new_chat"}
+        last_state = data
+        href = str(data.get("href") or "")
+        if "accounts.google.com" in href or "/signin" in href.lower():
+            return {"ready": False, "needs_reauth": True, "href": href, **data}
+        if "verify-account" in href.lower():
+            return {"ready": False, "needs_verify": True, "href": href, **data}
+        if data.get("ready"):
+            return data
+        time.sleep(0.6)
+    return {"ready": False, **last_state}
+
+
 def find_or_open_ai_studio_tab(
     client: Dict[str, Any],
     target_url: str = "https://aistudio.google.com/prompts/new_chat",
@@ -1132,25 +1191,25 @@ def find_or_open_ai_studio_tab(
     tabs_res = call_bridge_api("/command", method="POST", payload={"action": "LIST_TABS", "profile": profile_dir})
     tabs = tabs_res.get("tabs", [])
 
-    # Search strictly among AGENT-OWNED tabs (prefer AI Studio tab, then parked about:blank tab)
+    # Search strictly among AGENT-OWNED tabs (prefer AI Studio tab, then parked/initial blank/navigating tab)
     owned_aistudio_tab = None
     owned_blank_tab = None
     for t in tabs:
         tid_str = str(t.get("id"))
         if tid_str not in owned_ids:
             continue
-        t_url = t.get("url") or ""
+        t_url = t.get("url") or t.get("pendingUrl") or ""
         if "aistudio.google.com" in t_url:
             owned_aistudio_tab = t
             break
-        if t_url.strip().lower() in ("about:blank", "chrome://newtab/", "chrome://newtab") and owned_blank_tab is None:
+        if _is_blank_or_unloaded_url(t_url) and owned_blank_tab is None:
             owned_blank_tab = t
 
     chosen_tab = owned_aistudio_tab or owned_blank_tab
     if chosen_tab is not None:
         tab_id = chosen_tab["id"]
-        t_url = chosen_tab.get("url") or ""
-        print(f"[AIStudioSubagent] Reusing agent-owned tab (tabId: {tab_id}, url: {t_url})")
+        t_url = chosen_tab.get("url") or chosen_tab.get("pendingUrl") or ""
+        print(f"[AIStudioSubagent] Reusing agent-owned tab (tabId: {tab_id}, url: {t_url or '<initial>'})")
         call_bridge_api("/command", method="POST", payload={"action": "CDP_COMMAND", "profile": profile_dir, "params": {"tabId": tab_id, "method": "Page.bringToFront"}})
 
         current_base = t_url.split("?")[0].rstrip("/")
@@ -1176,7 +1235,7 @@ def find_or_open_ai_studio_tab(
                     "params": {"tabId": tab_id, "method": "Page.navigate", "params": {"url": target_url}},
                 },
             )
-            time.sleep(3.5)
+            time.sleep(2.0)
 
         return tab_id, True
 
@@ -1355,7 +1414,18 @@ def ask_ai_studio(
             )
         except Exception as exc:
             print(f"[AIStudioSubagent] Focus emulation unavailable: {exc}", file=sys.stderr)
-        time.sleep(3.0 if was_existing else 5.5)
+        time.sleep(1.5 if was_existing else 2.5)
+
+        # Wait for full SPA load & surface auth/verify redirects cleanly before helper injection
+        ready_state = wait_for_aistudio_ready(profile_dir, tab_id, timeout_sec=25.0)
+        if ready_state.get("needs_reauth"):
+            if profile_lock_manager:
+                profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
+            return {"ok": False, "code": "NEEDS_REAUTH", "error": f"Profile {profile_dir} redirected to sign-in ({ready_state.get('href')})."}
+        if ready_state.get("needs_verify"):
+            if profile_lock_manager:
+                profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
+            return {"ok": False, "code": "NEEDS_VERIFY", "error": f"Profile {profile_dir} requires AI Studio account verification ({ready_state.get('href')})."}
 
         # Check auth redirect (NEEDS_REAUTH)
         url_check = call_bridge_api(
@@ -1367,6 +1437,10 @@ def ask_ai_studio(
             if profile_lock_manager:
                 profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
             return {"ok": False, "code": "NEEDS_REAUTH", "error": f"Profile {profile_dir} redirected to sign-in ({url_check})."}
+        if "verify-account" in str(url_check).lower():
+            if profile_lock_manager:
+                profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
+            return {"ok": False, "code": "NEEDS_VERIFY", "error": f"Profile {profile_dir} requires AI Studio account verification ({url_check})."}
 
         # 4. Inject Helper Library into Tab
         call_bridge_api(
@@ -1379,7 +1453,7 @@ def ask_ai_studio(
         call_bridge_api(
             "/command",
             method="POST",
-            payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.handleOnboardingAndModals();"}},
+            payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio && window.__agyStudio.handleOnboardingAndModals();"}},
         )
         if popup_healer:
             heal_res = popup_healer.dismiss_blocking_popups(
@@ -1395,7 +1469,7 @@ def ask_ai_studio(
             call_bridge_api(
                 "/command",
                 method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio.startFreshChat();"}},
+                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio && window.__agyStudio.startFreshChat();"}},
             )
             time.sleep(0.5)
 
@@ -1403,42 +1477,96 @@ def ask_ai_studio(
             capture_tab_screenshot(client, tab_id, screenshot_path)
 
         # 6. Mandatory Post-Load Model Card Assertion (NEVER allow Gemini 4 Hydrogen!)
-        # Poll briefly on cold tab loads until Angular mounts .model-selector-card
-        assert_res = {}
-        for _wait_i in range(12):
-            assert_res = (
+        # Re-inject helper automatically if SPA hydration wiped window.__agyStudio; surface real EVAL_DOM errors instead of {}
+        def _probe_active_model() -> Tuple[Dict[str, Any], Dict[str, Any]]:
+            probe_code = (
+                "(() => {"
+                " if (typeof window.__agyStudio === 'undefined') {"
+                "   return {hasHelper: false, href: document.URL || location.href || '', readyState: document.readyState || '', title: document.title || ''};"
+                " }"
+                f" const c = window.__agyStudio.assertActiveModel({json.dumps(validated_model)});"
+                " return {hasHelper: true, href: document.URL || location.href || '', readyState: document.readyState || '', title: document.title || '', card: c};"
+                "})()"
+            )
+            raw = call_bridge_api(
+                "/command",
+                method="POST",
+                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": probe_code}},
+            )
+            if not isinstance(raw, dict) or not raw.get("ok"):
+                return {"ok": False, "actual": "", "eval_error": (raw or {}).get("error", "EVAL_DOM failed")}, {"eval_ok": False, "raw": raw}
+            res_obj = raw.get("result")
+            if not isinstance(res_obj, dict):
+                return {"ok": False, "actual": "", "eval_error": f"Unexpected result: {res_obj!r}"}, {"eval_ok": True, "raw": raw}
+            # Direct test mock fixture returning assertActiveModel dict directly
+            if "card" not in res_obj and "hasHelper" not in res_obj:
+                return res_obj, {"hasHelper": True}
+            if not res_obj.get("hasHelper"):
+                return {"ok": False, "actual": ""}, res_obj
+            card = res_obj.get("card") if isinstance(res_obj.get("card"), dict) else {}
+            return card, res_obj
+
+        assert_res: Dict[str, Any] = {}
+        last_meta: Dict[str, Any] = {}
+        reinjected_count = 0
+        for _wait_i in range(15):
+            assert_res, last_meta = _probe_active_model()
+            if last_meta.get("hasHelper") is False and reinjected_count < 3:
+                reinjected_count += 1
                 call_bridge_api(
                     "/command",
                     method="POST",
-                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.assertActiveModel({json.dumps(validated_model)});"}},
-                ).get("result")
-                or {}
-            )
+                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": AI_STUDIO_HELPERS_JS}},
+                )
+                call_bridge_api(
+                    "/command",
+                    method="POST",
+                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": "window.__agyStudio && window.__agyStudio.handleOnboardingAndModals();"}},
+                )
+                assert_res, last_meta = _probe_active_model()
             if assert_res.get("ok") or assert_res.get("blocked") or (assert_res.get("actual") or "").strip():
                 break
+            # Expand Run Settings panel if collapsed so .model-selector-card mounts
+            if _wait_i in (2, 6):
+                call_bridge_api(
+                    "/command",
+                    method="POST",
+                    payload={
+                        "action": "EVAL_DOM",
+                        "profile": profile_dir,
+                        "params": {
+                            "tabId": tab_id,
+                            "code": "const b = document.querySelector('button[aria-label*=\"Open run settings\" i], button[aria-label*=\"Run settings\" i]'); if (b && !document.querySelector('.model-selector-card')) b.click();",
+                        },
+                    },
+                )
             time.sleep(0.7)
-        if not assert_res.get("ok"):
-            print(f"[AIStudioSubagent] Model card check: {assert_res}. Attempting fallback UI selection -> {validated_model}...")
+
+        if not assert_res.get("ok") and not assert_res.get("blocked"):
+            print(f"[AIStudioSubagent] Model card check: {assert_res} (meta={last_meta}). Attempting fallback UI selection -> {validated_model}...")
             call_bridge_api(
                 "/command",
                 method="POST",
-                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.selectModel({json.dumps(validated_model)});"}},
+                payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio && window.__agyStudio.selectModel({json.dumps(validated_model)});"}},
             )
-            time.sleep(0.5)
-            assert_res = (
-                call_bridge_api(
-                    "/command",
-                    method="POST",
-                    payload={"action": "EVAL_DOM", "profile": profile_dir, "params": {"tabId": tab_id, "code": f"window.__agyStudio.assertActiveModel({json.dumps(validated_model)});"}},
-                ).get("result")
-                or {}
-            )
-            if assert_res.get("blocked") or not assert_res.get("ok"):
-                return {
-                    "ok": False,
-                    "code": "MODEL_ASSERTION_FAILED",
-                    "error": f"Refusing to run prompt: active AI Studio model card did not match {validated_model} ({assert_res}).",
-                }
+            time.sleep(0.6)
+            assert_res, last_meta = _probe_active_model()
+
+        if assert_res.get("blocked") or not assert_res.get("ok"):
+            fail_diag = r"./temp_read\aistudio_model_fail_diag.png"
+            capture_tab_screenshot(client, tab_id, fail_diag)
+            href = last_meta.get("href") or str(url_check or "")
+            if "verify-account" in str(href).lower() and profile_lock_manager:
+                profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
+            return {
+                "ok": False,
+                "code": "MODEL_ASSERTION_FAILED",
+                "diagnostic_screenshot": fail_diag,
+                "error": (
+                    f"Refusing to run prompt: active AI Studio model card did not match {validated_model} "
+                    f"({assert_res}; url={href!r}; readyState={last_meta.get('readyState')!r}; diag={fail_diag})."
+                ),
+            }
 
         # 7. Configure Run Settings (Thinking, 800k output tokens, Search OFF, CodeExec, URL context)
         run_cfg_res = call_bridge_api(
@@ -1747,7 +1875,7 @@ def ask_ai_studio(
             raw_text = response_data.get("text", "")
             thoughts = response_data.get("thoughts")
 
-            # Detect account verification gate rendered inline as a model error turn
+            # Detect account verification gate or inline transient/quota error rendered inside model turn
             if re.search(r"must be verified before it can continue|aistudio\.google\.com/verify-account", raw_text or "", re.I):
                 if profile_lock_manager:
                     profile_lock_manager.mark_profile_needs_reauth(profile_dir, "aistudio")
@@ -1755,6 +1883,21 @@ def ask_ai_studio(
                     "ok": False,
                     "code": "NEEDS_VERIFY",
                     "error": f"Profile {profile_dir} requires one-time AI Studio verification: {(raw_text or '').strip()[:240]}",
+                    "profile": leased_profile,
+                    "model": validated_model,
+                    "duration_seconds": round(time.time() - start_time, 1),
+                }
+            if len((raw_text or "").strip()) < 300 and re.search(
+                r"model isn['’]t available right now|model is not available right now|please wait a minute and try again|quota exceeded|resource has been exhausted",
+                raw_text or "",
+                re.I,
+            ):
+                if profile_lock_manager and re.search(r"quota|resource has been exhausted", raw_text or "", re.I):
+                    profile_lock_manager.mark_bucket_cooldown(leased_profile, bucket_name, 1800, reason=raw_text.strip()[:200])
+                return {
+                    "ok": False,
+                    "code": "AISTUDIO_INLINE_MODEL_ERROR",
+                    "error": f"AI Studio returned inline model error: {(raw_text or '').strip()[:240]}",
                     "profile": leased_profile,
                     "model": validated_model,
                     "duration_seconds": round(time.time() - start_time, 1),

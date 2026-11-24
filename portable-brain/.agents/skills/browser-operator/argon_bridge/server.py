@@ -244,22 +244,54 @@ def get_resources_snapshot() -> Dict[str, Any]:
     }
 
 
-async def reconcile_agent_tabs(profile: str | None = None, app: web.Application | None = None) -> Dict[str, Any]:
-    """Drop only entries observed before a successful inventory of the same client."""
-    owned_tabs = _load_resources()["owned_tabs"]
-    for prof in [profile] if profile else list(owned_tabs):
+def _can_reconcile_empty_profile(profile: str, app: web.Application | None) -> bool:
+    if app is not None:
+        now = time.time()
+        for slot in app.get(PENDING_SLOTS, {}).values():
+            if isinstance(slot, dict) and slot.get("profile") == profile and slot.get("expires_at", now + 1) > now:
+                return False
+            if isinstance(slot, tuple) and slot[0] == profile:
+                return False
+    try:
+        leases = profile_lock_manager.clean_expired_locks()
+    except Exception:
+        return False  # A missing lease snapshot cannot authorize pruning.
+    return not any((entry.get("profile") or key.split("::", 1)[0]) == profile for key, entry in leases.items())
+
+
+async def reconcile_agent_tabs(
+    profile: str | None = None, app: web.Application | None = None, disconnected_grace_sec: float = 15.0,
+) -> Dict[str, Any]:
+    """Reconcile old disconnected ownership and fence live inventory by client generation."""
+    observed = _load_resources()
+    owned_tabs = observed["owned_tabs"]
+    launched_profiles = observed["launched_by_agent"]
+    for prof in [profile] if profile else sorted(owned_tabs.keys() | launched_profiles.keys()):
         previous = owned_tabs.get(prof, {})
+        previous_launch = launched_profiles.get(prof)
+        if not previous and previous_launch is None:
+            continue
         client_id, client = _resolve_live_client(prof)
-        if not previous or not client or client.get("dir_name") != prof:
-            continue
-        client_generation = client.get("connected_at")
-        result = await send_extension_command(
-            "LIST_TABS", {}, preferred_profile=prof, timeout=3.0, client_id=client_id
-        )
-        if CONNECTED_CLIENTS.get(client_id) is not client or client.get("connected_at") != client_generation:
-            continue
-        tabs = result.get("tabs")
-        if not result.get("ok") or not isinstance(tabs, list):
+        if not client or client.get("dir_name") != prof:
+            timestamps = [
+                entry[field] for entry in [*previous.values(), previous_launch or {}]
+                for field in ("last_seen", "created_at", "launched_at") if isinstance(entry.get(field), (int, float))
+            ]
+            if timestamps and time.time() - max(timestamps) < disconnected_grace_sec:
+                continue
+            tabs = []
+        else:
+            client_generation = client.get("connected_at")
+            result = await send_extension_command(
+                "LIST_TABS", {}, preferred_profile=prof, timeout=3.0, client_id=client_id
+            )
+            if CONNECTED_CLIENTS.get(client_id) is not client or client.get("connected_at") != client_generation:
+                continue
+            tabs = result.get("tabs")
+            if not result.get("ok") or not isinstance(tabs, list):
+                continue
+
+        if not tabs and not _can_reconcile_empty_profile(prof, app):
             continue
         live_ids = {str(tab["id"]) for tab in tabs if isinstance(tab, dict) and tab.get("id") is not None}
         current = _load_resources()
@@ -269,6 +301,9 @@ async def reconcile_agent_tabs(profile: str | None = None, app: web.Application 
             if tab_id not in live_ids and current_tabs.get(tab_id) == old_entry:
                 del current_tabs[tab_id]
                 removed = True
+        if not tabs and not current_tabs and previous_launch is not None and current["launched_by_agent"].get(prof) == previous_launch:
+            del current["launched_by_agent"][prof]
+            removed = True
         if removed:
             _save_resources(current)
     return get_resources_snapshot()
@@ -412,6 +447,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     finally:
         CONNECTED_CLIENTS.pop(client_id, None)
         print(f"[Bridge] Extension disconnected: {client_id}")
+        profile = client_entry["dir_name"]
+        if profile != "unknown" and _resolve_live_client(profile)[1] is None:
+            await reconcile_agent_tabs(profile, app=request.app)
 
     return ws
 
@@ -437,7 +475,7 @@ async def handle_health(request: web.Request) -> web.Response:
 async def handle_resources(request: web.Request) -> web.Response:
     """GET /resources - Returns global agent fleet budget (profiles/3, tabs/6) and ownership ledger."""
     if request.query.get("reconcile") in ("1", "true", "yes"):
-        snap = await reconcile_agent_tabs()
+        snap = await reconcile_agent_tabs(app=request.app)
     else:
         snap = get_resources_snapshot()
     return web.json_response({"ok": True, **snap})
@@ -671,7 +709,7 @@ async def handle_command(request: web.Request) -> web.Response:
     if action == "OPEN_TAB":
         if profile_lock_manager.is_profile_evicting(profile):
             return web.json_response({"ok": False, "code": "PROFILE_BUSY"}, status=409)
-        await reconcile_agent_tabs()
+        await reconcile_agent_tabs(app=request.app)
         async with lock:
             token = reserve_slot(request, profile, tab=True)
             if token is None:
@@ -965,7 +1003,7 @@ async def handle_profile_open(request: web.Request, *, launch_defaults: bool = F
     lock = request.app[ADMISSION_LOCK]
     token = None
     if not is_setup:
-        await reconcile_agent_tabs()
+        await reconcile_agent_tabs(app=request.app)
         async with lock:
             if any(slot == (str(profile), False) for slot in request.app[PENDING_SLOTS].values()):
                 return web.json_response({"ok": False, "code": "PROFILE_LAUNCH_PENDING"}, status=409)
@@ -1142,6 +1180,7 @@ async def background_idle_reaper(app_instance: web.Application) -> None:
     while True:
         try:
             await asyncio.sleep(60.0)
+            await reconcile_agent_tabs(app=app_instance)
             await reap_idle_tabs_and_profiles(idle_seconds=120.0)
         except asyncio.CancelledError:
             break
@@ -1232,6 +1271,28 @@ def create_app() -> web.Application:
 
     # Lightweight 60s background idle reaper task
     async def start_background_tasks(app_instance: web.Application) -> None:
+        if sys.platform == "win32":
+            loop = asyncio.get_running_loop()
+            prev_handler = loop.get_exception_handler()
+
+            def _quiet_proactor_reset(cur_loop: asyncio.AbstractEventLoop, context: Dict[str, Any]) -> None:
+                exc = context.get("exception")
+                msg = str(context.get("message") or "")
+                handle_str = str(context.get("handle") or "")
+                if (
+                    isinstance(exc, ConnectionResetError)
+                    and getattr(exc, "winerror", None) == 10054
+                    and ("_ProactorBasePipeTransport._call_connection_lost" in handle_str or "connection_lost" in msg)
+                ):
+                    return
+                if prev_handler is not None:
+                    prev_handler(cur_loop, context)
+                else:
+                    cur_loop.default_exception_handler(context)
+
+            loop.set_exception_handler(_quiet_proactor_reset)
+
+        await reconcile_agent_tabs(app=app_instance)
         app_instance["idle_reaper_task"] = asyncio.create_task(background_idle_reaper(app_instance))
 
     async def cleanup_background_tasks(app_instance: web.Application) -> None:

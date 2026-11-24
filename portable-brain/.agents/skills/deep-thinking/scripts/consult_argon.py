@@ -280,12 +280,14 @@ def consult_argon_web(
     allow_paid_api_fallback: bool = False,
     model: Optional[str] = None,
     mode: str = "chat",
+    keep_tab: bool = False,
 ) -> Dict[str, Any]:
     """Routes Gemini Web queries exclusively to `4 Neon` + `High` Thinking."""
     driver = None
     sid = None
     target_prof = profile
     lease_acquired = False
+    had_error = True
     agent_id = session_id or f"agent_{int(time.time() * 1000)}"
     route = resolve_execution_route(model=model, thinking=thinking, mode=mode, deep_research=deep_research) if resolve_execution_route else {
         "mode": "chat" if deep_research else mode,
@@ -336,6 +338,7 @@ def consult_argon_web(
                 out_p = BRAIN_ROOT / out_p
             out_p.parent.mkdir(parents=True, exist_ok=True)
             out_p.write_text(response_text, encoding="utf-8")
+        had_error = False
         return {
             "ok": True,
             "surface": "web",
@@ -351,9 +354,19 @@ def consult_argon_web(
             "duration_seconds": res.get("duration_seconds", 0.0),
         }
     finally:
-        if auto_clean and driver and sid:
+        if driver is not None and sid:
             try:
-                driver.delete_session(sid, profile=target_prof)
+                if auto_clean:
+                    driver.delete_session(sid, profile=target_prof, close_tab=not keep_tab)
+                elif had_error and not keep_tab:
+                    meta = driver.registry.get(sid) or {}
+                    tab_id = driver.tab_id or meta.get("tab_id")
+                    if tab_id is not None:
+                        driver._call_api(
+                            "/command",
+                            {"action": "CLOSE_TAB", "agent_guarded": True, "params": {"tabId": tab_id}},
+                            profile=target_prof,
+                        )
             except Exception:
                 pass
         if lease_acquired and release_profile_lease and target_prof:
@@ -432,6 +445,7 @@ def run_single_consultation(
         session_id=session_id,
         new_chat=not continue_session,
         own_tab=own_tab,
+        keep_tab=keep_tab,
         output_path=output_path,
         allow_paid_api_fallback=allow_paid_api_fallback,
         model=route["model"],
@@ -834,7 +848,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--usage", action="store_true", help="Audit Gemini Web usage quota")
     parser.add_argument("--clean", "--delete", dest="clean", action="store_true", default=True, help="Delete temporary web sidebar chat after turn (default: True)")
     parser.add_argument("--no-clean", "--keep", dest="clean", action="store_false", help="Retain sidebar chat")
-    parser.add_argument("--keep-tab", action="store_true", help="Keep AI Studio tab active instead of parking on about:blank")
+    parser.add_argument("--keep-tab", action="store_true", help="Keep the browser tab open after the consultation")
     parser.add_argument("--allow-paid-api-fallback", action="store_true", default=False, help="Allow paid Vertex AI failover if requested")
     parser.add_argument("--api", action="store_true", help="Tier-2 Vertex AI Argon API route (explicit only)")
     parser.add_argument("--new-tab", action="store_true", help="Open dedicated new Gemini Web tab")
